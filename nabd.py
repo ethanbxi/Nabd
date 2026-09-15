@@ -52,6 +52,9 @@ CONFIG_PATH = DATA_DIR / "config.json"
 LOG_PATH = DATA_DIR / "nabd.log"
 BANNER_TRIGGER = DATA_DIR / ".banner_trigger"
 SETTINGS_TRIGGER = DATA_DIR / ".settings_trigger"
+# Written into the trigger to mean "open", as opposed to the timestamp the
+# hotkey and the tray write, which means "toggle".
+SETTINGS_SHOW = "show"
 AV_TEST_TRIGGER = DATA_DIR / ".av_test"
 # The settings panel asks us to let go of the nab keys while it listens for a
 # new one. Holds a deadline, so a panel that dies mid-capture cannot leave the
@@ -1871,6 +1874,9 @@ class App:
         self._hold = threading.Event()
         self._job = create_kill_on_close_job()
         self._cfg_stamp = self._stamp()
+        # Set by main(): everything except the sign-in launch should show a
+        # window, or there is no way to tell the app started at all.
+        self.show_panel_on_start = False
 
     def _stamp(self):
         try:
@@ -2180,7 +2186,7 @@ class App:
         self.open_hotkey = self._bind(self.cfg.get("open_hotkey"),
                                       self.open_settings, 2, "open Nab'd")
 
-    def ensure_settings_helper(self):
+    def ensure_settings_helper(self, show=False):
         """Keep a warm settings process alive.
 
         Same reasoning as the banner: tkinter cannot share a main thread with
@@ -2191,8 +2197,9 @@ class App:
         if self._settings and self._settings.poll() is None:
             return
         try:
+            args = ["--daemon"] + (["--show"] if show else [])
             self._settings = subprocess.Popen(
-                helper_command("settings", "--daemon"),
+                helper_command("settings", *args),
                 cwd=str(ASSET_DIR), creationflags=CREATE_NO_WINDOW)
             if self._job:
                 ctypes.windll.kernel32.AssignProcessToJobObject(
@@ -2272,7 +2279,9 @@ class App:
         self.recorder.clear_buffer()
         self.recorder.start()
         self.ensure_banner_helper()  # warm, so the first clip confirms instantly
-        self.ensure_settings_helper()   # and so the first open is not a wait
+        # ...and so the first open is not a wait. `show` asks it to present
+        # itself once built, which is what "opening the app" has to do.
+        self.ensure_settings_helper(show=self.show_panel_on_start)
         self.report_hotkeys()
         # A stale note from a panel that died mid-capture would otherwise keep
         # the keys off; clear it before anything is bound to it.
@@ -2308,6 +2317,25 @@ def claim_single_instance():
     return handle
 
 
+def wants_panel(argv, config_exists):
+    """Should this launch put the settings panel on screen?
+
+    Four things start this exe and they are otherwise identical: the
+    installer's "start now" box, the Start Menu and desktop icons, a double
+    click, and Windows at sign-in. Only sign-in passes --autostart, and it is
+    the only one that must stay out of the way - a panel sliding in over
+    whatever you are doing on every logon is worse than the confusion it
+    solves.
+
+    A first run is the exception: a silent install followed by a reboot would
+    otherwise never show the app at all, which is exactly the "is this even
+    working?" it is meant to answer.
+    """
+    if "--autostart" not in argv:
+        return True
+    return not config_exists
+
+
 def main():
     # One executable, three roles. Frozen there is no interpreter to hand a
     # script to, so the helpers are this same binary re-invoked with a flag.
@@ -2319,11 +2347,30 @@ def main():
         return banner.main() or 0
 
     log(f"--- {DISPLAY_NAME} starting ---")
+    # Windows starts us with --autostart at sign-in. Every other launch - the
+    # installer's "start now", the Start Menu, the desktop icon, a double
+    # click on the exe - is somebody opening the app, and they should get a
+    # window. A first run shows one either way: a silent install followed by a
+    # reboot would otherwise never show the app at all.
+    first_run = not CONFIG_PATH.exists()
+    show = wants_panel(sys.argv, not first_run)
+
     if claim_single_instance() is None:
-        log("another instance is already running; exiting")
-        ctypes.windll.user32.MessageBoxW(
-            None, f"{DISPLAY_NAME} is already running - check the system tray.",
-            DISPLAY_NAME, 0x40)
+        # Already running. This used to answer with a message box telling you
+        # to go and look at the tray, which is no answer to the question being
+        # asked - whether the thing is working. Show the panel instead.
+        log("already running; opening the settings panel")
+        # We were launched by the user, so we hold the foreground right the
+        # panel needs and it does not. ASFW_ANY because the helper's pid
+        # belongs to the other instance.
+        ctypes.windll.user32.AllowSetForegroundWindow(-1)
+        try:
+            SETTINGS_TRIGGER.write_text(SETTINGS_SHOW, encoding="utf-8")
+        except OSError:
+            ctypes.windll.user32.MessageBoxW(
+                None,
+                f"{DISPLAY_NAME} is already running - check the system tray.",
+                DISPLAY_NAME, 0x40)
         return 0
 
     cfg = load_config()
@@ -2333,7 +2380,12 @@ def main():
         ctypes.windll.user32.MessageBoxW(None, str(exc), DISPLAY_NAME, 0x10)
         return 1
 
-    App(cfg, ffmpeg).run()
+    app = App(cfg, ffmpeg)
+    app.show_panel_on_start = show
+    if show:
+        log("opening the settings panel (%s)"
+            % ("first run" if first_run else "launched by hand"))
+    app.run()
     return 0
 
 

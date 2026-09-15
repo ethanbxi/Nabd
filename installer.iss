@@ -8,7 +8,7 @@
 
 #define AppName "Nab'd"
 #define AppShortName "Nabd"
-#define AppVersion "2.0.0"
+#define AppVersion "2.1.0"
 #define AppPublisher "Nab'd"
 #define AppExe "Nabd.exe"
 
@@ -95,7 +95,7 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; \
 ; cost this installer its no-UAC install.)
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
     ValueType: string; ValueName: "{#AppShortName}"; \
-    ValueData: """{app}\{#AppExe}"""; \
+    ValueData: """{app}\{#AppExe}"" --autostart"; \
     Flags: uninsdeletevalue; Tasks: startup
 
 [InstallDelete]

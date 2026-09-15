@@ -11,7 +11,7 @@ corner: *Nabbed — 5:00 · 1.2 GB*.
 
 ## Install
 
-Run **`NabdSetup-2.0.0.exe`** and click through the wizard.
+Run **`NabdSetup-2.1.0.exe`** and click through the wizard.
 
 Nothing else is needed — no Python, no ffmpeg, no fonts, no account. It is a
 per-user install, so there is **no admin prompt**, and everything lands in
@@ -265,7 +265,7 @@ python build.py
 ```
 
 Three stages — gather the payload, freeze, package — ending at
-`dist\NabdSetup-2.0.0.exe` (~70 MB).
+`dist\NabdSetup-2.1.0.exe` (~70 MB).
 
 Needs on the build machine:
 

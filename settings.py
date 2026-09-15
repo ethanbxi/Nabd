@@ -2743,8 +2743,15 @@ class Panel:
 
     # -- resident mode ------------------------------------------------------
 
-    def run_daemon(self):
+    def run_daemon(self, show=False):
         """Stay hidden and built, and slide in when the trigger file changes.
+
+        `show` presents the panel once it is warm, without going through the
+        trigger file. The trigger cannot do this job: the baseline stamp below
+        is taken before the widgets are built, so a write from the app that
+        spawned us either lands before the baseline and is swallowed, or lands
+        after it and has to be timed against a build we cannot observe from
+        another process. Being told at spawn time has no race in it.
 
         Same shape as the banner helper: the expensive part is creating the Tk
         interpreter and ~340 widgets, so it is paid once at sign-in instead of
@@ -2756,6 +2763,8 @@ class Panel:
         # the baseline and silently discarded - the first press after logon
         # doing nothing at all.
         self._trigger_stamp = _stamp()
+        if show:
+            self.root.after(120, self._show_when_warm)
         self._warm_layout()
         # _pump takes it from here, prewarming until the panel is complete
         # and every block measured, so an open is nothing but the animation.
@@ -2785,12 +2794,38 @@ class Panel:
             f"{self._w}x{self._h}+{self._dock_x - self._w}+{self._y}")
         self.root.update_idletasks()
 
+    def _show_when_warm(self, waited=0.0):
+        """Present as soon as the panel is built, and only once.
+
+        Waiting for _warm rather than opening immediately: the whole point of
+        the resident helper is that an open is nothing but the animation, and
+        sliding in over a half-built panel would undo that on the one open
+        most likely to be somebody's first.
+        """
+        if self._shown or self._closing:
+            return
+        if not self._warm and waited < 20.0:
+            self.root.after(100, lambda: self._show_when_warm(waited + 0.1))
+            return
+        try:
+            self.toggle()
+        except Exception as exc:
+            print("open on launch failed:", exc)
+
     def _watch(self):
         stamp = _stamp()
         if stamp and stamp != self._trigger_stamp:
             self._trigger_stamp = stamp
             try:
-                self.toggle()
+                # A hotkey or a tray click toggles - you press the same thing
+                # to put it away. Launching the exe does not: it means "open
+                # the app", and closing the panel because it happened to be up
+                # looks like the app shutting itself down.
+                if _trigger_wants_show():
+                    if not self._shown:
+                        self.toggle()
+                else:
+                    self.toggle()
             except Exception as exc:
                 print("toggle failed:", exc)
         try:
@@ -2804,6 +2839,15 @@ def _stamp():
         return nabd.SETTINGS_TRIGGER.stat().st_mtime_ns
     except OSError:
         return None
+
+
+def _trigger_wants_show():
+    """Did whoever wrote the trigger mean "open", rather than "toggle"?"""
+    try:
+        return nabd.SETTINGS_TRIGGER.read_text(
+            encoding="utf-8").strip() == nabd.SETTINGS_SHOW
+    except OSError:
+        return False
 
 
 DAEMON_MUTEX = "Nabd.SettingsDaemon"
@@ -2832,7 +2876,7 @@ def main():
         handle = ctypes.windll.kernel32.CreateMutexW(None, False, DAEMON_MUTEX)
         if not handle or ctypes.windll.kernel32.GetLastError() == 183:
             return 0                      # ERROR_ALREADY_EXISTS
-        Panel(daemon=True).run_daemon()
+        Panel(daemon=True).run_daemon(show="--show" in sys.argv)
         return 0
     # A one-shot launch (the Start Menu shortcut) should still go through the
     # resident panel when there is one, or two would appear.
