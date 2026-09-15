@@ -1,11 +1,32 @@
-# Nab'd
+<div align="center">
+
+<img src="docs/media/hero.png" alt="Nab'd — instant replay for Windows" width="100%">
+
+<p>
+  <a href="https://github.com/ethanbxi/Nabd/releases/latest"><img src="https://img.shields.io/badge/download-NabdSetup%202.1.0-6C3BAA?style=for-the-badge&labelColor=17161A" alt="Download"></a>
+  <img src="https://img.shields.io/badge/windows-10%20%2F%2011-4E2A7D?style=for-the-badge&labelColor=17161A" alt="Windows 10/11">
+  <img src="https://img.shields.io/badge/no%20admin-per--user%20install-4E2A7D?style=for-the-badge&labelColor=17161A" alt="Per-user install">
+  <img src="https://img.shields.io/badge/license-MIT-4E2A7D?style=for-the-badge&labelColor=17161A" alt="MIT">
+</p>
+
+</div>
+
+---
 
 A minimal instant-replay buffer for Windows. It continuously records your
 screen in the background; pressing a hotkey writes the last few minutes to an
 mp4. That's the whole feature set.
 
-**Press `Alt + Insert` to save a nab.** A banner confirms it in the bottom-right
-corner: *Nabbed — 5:00 · 1.2 GB*.
+**Press <kbd>Alt</kbd> + <kbd>Insert</kbd> to save a nab.** A banner confirms it
+in the corner: *Nabbed — 5:00 · 1.2 GB*.
+
+<div align="center">
+
+<img src="docs/media/banner.gif" alt="The save banner: a line slides out of the corner, the card stands up, the mark draws itself on, the dismiss rule drains, and the whole thing withdraws" width="620">
+
+<sub>4,120 ms, eight beats, one axis at a time. Trigger to first pixel: <b>5–7 ms</b>.</sub>
+
+</div>
 
 ---
 
@@ -27,6 +48,7 @@ The wizard offers a desktop shortcut and *start when I sign in* — both on by
 default. Uninstall from **Settings → Apps** like anything else; it removes the
 app and the buffer and **leaves your saved nabs alone**.
 
+> [!WARNING]
 > **Windows will warn you the first time.** The installer isn't code-signed
 > (a certificate costs a few hundred dollars a year), so SmartScreen shows
 > *"Windows protected your PC"*. Click **More info → Run anyway**. This is the
@@ -51,13 +73,11 @@ Everything is changeable afterwards in Settings.
 
 ## How it works
 
-```
-ddagrab (GPU desktop capture) ──┐
-                                ├─→ h264_nvenc ─→ 2s .ts segments ─→ ring buffer
-WASAPI loopback + mic ──────────┘                                         │
-                                                                          │
-              hotkey ─────────────────→ concat -c copy ─→ nab.mp4 ←───────┘
-```
+<div align="center">
+
+<img src="docs/media/pipeline.png" alt="ddagrab and WASAPI loopback feed h264_nvenc, which writes 2-second .ts segments into a self-pruning ring buffer; the hotkey concatenates the newest segments with a stream copy into nab.mp4" width="100%">
+
+</div>
 
 The screen is *always* being encoded into small MPEG-TS segments, and old ones
 are deleted. Saving a nab just concatenates the newest segments with a stream
@@ -85,6 +105,16 @@ folder picker do not count as clicking away. Right-clicking gives the full menu,
 and the *Nab'd Settings* Start Menu shortcut works as well. Opening it again
 raises the panel you already have rather than stacking copies.
 
+<div align="center">
+
+<img src="docs/media/settings.png" alt="The settings panel: buffer card, recent nabs, capture, hotkeys, video and audio" width="100%">
+
+<sub>One drawer, shown as two columns. On screen it is a single 640px panel running the full height of the display.</sub>
+
+</div>
+
+<!-- A real screenshot of the tray menu can go here as docs/media/tray.png. -->
+
 ```
 Recording - 5 min buffered        (status)
 -----------------------------------
@@ -98,7 +128,16 @@ View log
 Quit
 ```
 
-**`Ctrl+Alt+N` opens the panel** without going near the tray.
+**<kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>N</kbd> opens the panel** without
+going near the tray.
+
+<div align="center">
+
+<img src="docs/media/panel-open.gif" alt="The panel opening: the shell docks first, then the six blocks wipe out from the left edge in turn" width="320">
+
+<sub>720 ms in two phases that never overlap — the shell docks, <i>then</i> six blocks deal out, each wiping left to right while it slips into place.</sub>
+
+</div>
 
 The panel is a 640px drawer with one repeated grammar: a label on the left, a
 fixed 344px control column on the right, and anything secondary — a disk meter,
@@ -138,7 +177,10 @@ place. Editing `config.json` by hand works the same way.
 Choosing **1 minute** buffers only 1 minute, so it also uses proportionally
 less disk.
 
-A few things are only in `config.json`, not the window:
+<details>
+<summary><b>A few things are only in <code>config.json</code>, not the window</b></summary>
+
+<br>
 
 | Key | Default | Notes |
 |---|---|---|
@@ -147,13 +189,15 @@ A few things are only in `config.json`, not the window:
 | `banner_delay` | `0.2` | Beat between the keypress and the banner sliding in. Set to `0` for instant. |
 | `preset` | `p5` | NVENC preset. `p4`/`p3` cost less GPU time if capture struggles under load |
 | `encoder` | `auto` | Force one of `h264_nvenc`, `h264_amf`, `h264_qsv`, `libx264` instead of probing |
-| `hotkey_alt` | `""` | A second combo that also saves a nab. `RegisterHotKey` is first-come-first-served, so a key another app claimed first can never be taken from it - set the key you actually want as `hotkey` and a free one here, and Nab'd keeps asking for the first in the background while the second works. |
+| `hotkey_alt` | `""` | A second combo that also saves a nab. `RegisterHotKey` is first-come-first-served, so a key another app claimed first can never be taken from it — set the key you actually want as `hotkey` and a free one here, and Nab'd keeps asking for the first in the background while the second works. |
 | `draw_mouse` | `true` | Include the cursor |
 
 `audio_offset_ms` starts at `-150`, measured against a flash/tone reference.
 Capture latency accounts for only part of that, so it is a starting point
 rather than a constant — the Audio section exposes it as a slider. Save a nab,
 watch it, and nudge until speech lines up.
+
+</details>
 
 ## Is capture healthy?
 
@@ -175,7 +219,8 @@ performance problem.
 
 ## Fullscreen games — important
 
-**Run your game in Borderless Windowed (sometimes "Windowed Fullscreen").**
+> [!IMPORTANT]
+> **Run your game in Borderless Windowed** (sometimes "Windowed Fullscreen").
 
 Nab'd captures the screen with DXGI Desktop Duplication. When a game takes
 *exclusive* fullscreen, Windows hands the display to that game and Desktop
@@ -186,8 +231,14 @@ Windows API, not something a setting here can fix.
 Borderless costs essentially nothing on a modern GPU and makes capture work
 perfectly. Most games default to it.
 
-If capture keeps losing the display, Nab'd shows a red banner saying so rather
-than letting you find out when a nab turns out to be frozen.
+If capture keeps losing the display, Nab'd says so in the same corner rather
+than letting you find out when a nab turns out to be frozen:
+
+<div align="center">
+
+<img src="docs/media/banner-fail.gif" alt="The failure banner — the same motion on the danger field" width="620">
+
+</div>
 
 The only way to capture exclusive fullscreen is to inject into the game and
 hook its present calls, which is what OBS Game Capture does — and precisely the
@@ -218,9 +269,9 @@ behaviour anti-cheat systems flag. Nab'd deliberately does not do this.
   ~300s ± 2s rather than exactly 300.
 - **The banner confirms right away; the nab finishes a moment later.** The
   helper that draws it stays resident and watches a trigger file, so trigger to
-  first pixel is 5-7ms once its frames are loaded.
+  first pixel is 5–7 ms once its frames are loaded.
 
-  The motion is 4,120ms in eight beats: a 4px line slides out of the corner,
+  The motion is 4,120 ms in eight beats: a 4px line slides out of the corner,
   holds, the card stands up out of it, the mark draws itself on and the copy
   fades up, the dismiss rule drains for 2.6s, then the mark winds back, the card
   collapses onto the line, holds, and the line withdraws into the corner. Three
@@ -230,7 +281,7 @@ behaviour anti-cheat systems flag. Nab'd deliberately does not do this.
   **asymmetric easing**: the collapse decelerates because it comes to rest on the
   line, and only the final slide accelerates, because it actually leaves.
 
-  The size is not known when the banner opens - assembly is still running - so
+  The size is not known when the banner opens — assembly is still running — so
   it appears with the nab length and the figure is filled in afterwards, in
   place, without restarting the timeline. If the save fails, a red banner
   corrects it.
@@ -238,9 +289,10 @@ behaviour anti-cheat systems flag. Nab'd deliberately does not do this.
   Encoding runs with no B-frames and no lookahead so footage reaches disk
   promptly, and ffmpeg runs at above-normal priority so a busy game cannot
   starve it below its target frame rate.
-- **`alt+f9` and `alt+f10` belong to NVIDIA ShadowPlay.** Avoid them. If a
-  hotkey is taken at launch, Nab'd warns in the tray and keeps retrying in the
-  background — recording is never blocked by a hotkey problem.
+- **<kbd>Alt</kbd>+<kbd>F9</kbd> and <kbd>Alt</kbd>+<kbd>F10</kbd> belong to
+  NVIDIA ShadowPlay.** Avoid them. If a hotkey is taken at launch, Nab'd warns
+  in the tray and keeps retrying in the background — recording is never blocked
+  by a hotkey problem.
 - **Anti-cheat.** The hotkey uses Win32 `RegisterHotKey`, the official system
   API. It installs no keyboard hook and does not inject into games, which is the
   behaviour anti-cheat systems object to.
@@ -257,6 +309,61 @@ behaviour anti-cheat systems flag. Nab'd deliberately does not do this.
   manual launch won't produce two recorders fighting over the buffer.
 - **HDR.** If you turn on Windows HDR, `ddagrab` output will need tone-mapping
   and nabs may look washed out. Not currently handled.
+
+## Brand
+
+The interface follows the Nab'd visual identity.
+
+<div align="center">
+
+<img src="docs/media/logos.png" alt="The primary lockup on the purple field, and the app tile at four sizes" width="100%">
+
+<img src="docs/media/palette.png" alt="Nab'd Purple #6C3BAA, Purple Light #9B6BD8, Purple Deep #4E2A7D, Cream #E8E4DC, Ink #17161A, Shell #0A0A0C" width="100%">
+
+</div>
+
+Three rules shaped the code:
+
+- **The contrast rule.** Nab'd Purple `#6C3BAA` measures 2.7:1 on the near-black
+  shell, under the 3:1 floor for UI shapes. So purple appears as linework only
+  in Purple Light `#9B6BD8`; full-strength purple is used exclusively as a
+  *field* with cream on top, which clears 7.2:1. `theme.FIELD` and
+  `theme.ACCENT` keep the two roles separate, and the UI tests assert it. The
+  installer's wizard panel is the same rule at a larger size — a purple field,
+  cream lockup.
+- **The artwork comes from the supplied SVGs.** `render_assets.py` rasterises
+  `brand/*.svg` into `brand/render/*.png` once; the app loads those and scales
+  them down, so the wordmark and mark are the real artwork rather than geometry
+  transcribed into code.
+
+  Two things are still built from the published measurements: the **app tile**
+  (its SVG nests an inner `<svg>` with its own viewBox, which the rasteriser
+  mis-places — the ring came out off-centre with a 7% stroke) and the
+  **animated mark** in the banner, whose 17 sweep frames are generated at build
+  time from the same 295° geometry and asserted against it — at the last frame
+  the sweep *is* the mark, gap open at 1 o'clock, or the build fails. Both are
+  checked against the spec: ring extent 47.5% of the tile, stroke 8.0%,
+  optically centred.
+- **The mark is one stroke, and it never rotates.** The artwork ships as two
+  paths, but the second ends exactly where the first begins, so it is a single
+  295° stroke from 95° with one 65° gap — drawing it as two arcs leaves a seam
+  at the join. The banner traces that stroke on as it arrives and retraces it
+  away as it leaves. Rotating it would turn a ring buffer into a loading
+  spinner, so nothing spins.
+
+Type is **Outfit** for interface and **JetBrains Mono** for hotkeys, paths,
+durations and nab timestamps, at the published px scale. The installer places
+both per-user (open-licensed, no admin needed). Outfit exposes each weight as
+its own family to Windows, so weights 400/500/600 are selected by family rather
+than by asking Tk for "bold". If a face is ever missing, `brand.font()` degrades
+along the guidelines' own chain to system-ui and ui-monospace.
+
+The tray and the shortcuts both use the purple app tile, rendered per size so
+the 22.5% corner radius and 58% ring hold down to 16px; pausing desaturates the
+field and keeps the silhouette. (The guidelines prefer a monochrome template in
+a tray, on the grounds that Windows draws it over unknown wallpaper — the tile
+was the explicit choice here, and the same document argues the field treatment
+is what survives at small sizes.)
 
 ## Building the installer
 
@@ -297,7 +404,10 @@ python make_wizard_art.py    # brand assets -> installer/wizard*.bmp
 `render_assets.py` needs `svglib`, `reportlab` and `rlPyCairo`; the app itself
 does not.
 
-## Files
+<details>
+<summary><b>Files</b></summary>
+
+<br>
 
 | File | Purpose |
 |---|---|
@@ -319,6 +429,9 @@ does not.
 | `installer.iss` | Inno Setup script |
 | `make_wizard_art.py` | Wizard BMPs from the brand assets |
 | `render_assets.py` | Rasterises `brand/*.svg` |
+| `render_readme_media.py` | The hero, pipeline and banner artwork on this page |
+| `render_settings_panel.py` | The panel still and its open, drawn from `nabd_paint` + `nabd_tokens` |
+| `docs/media/` | What those two produce |
 | `vendor/` | Bundled ffmpeg and font faces (build input) |
 | `_test/` | Test + benchmark scripts used to validate the pipeline |
 
@@ -327,51 +440,12 @@ Installed, the app's own data lives apart from its program files: `config.json`,
 reachable from the tray) are all under `%LOCALAPPDATA%\Nabd`. Run from source,
 they sit next to the scripts instead.
 
-## Brand
+</details>
 
-The interface follows the Nabd visual identity. Three rules shaped the code:
+<details>
+<summary><b>Verified</b> — every check this build has been put through</summary>
 
-- **The contrast rule.** Nabd Purple `#6C3BAA` measures 2.7:1 on the near-black
-  shell, under the 3:1 floor for UI shapes. So purple appears as linework only
-  in Purple Light `#9B6BD8`; full-strength purple is used exclusively as a
-  *field* with cream on top, which clears 7.2:1. `theme.FIELD` and
-  `theme.ACCENT` keep the two roles separate, and the UI tests assert it. The
-  installer's wizard panel is the same rule at a larger size — a purple field,
-  cream lockup.
-- **The artwork comes from the supplied SVGs.** `render_assets.py` rasterises
-  `brand/*.svg` into `brand/render/*.png` once; the app loads those and scales
-  them down, so the wordmark and mark are the real artwork rather than geometry
-  transcribed into code.
-
-  Two things are still built from the published measurements: the **app tile**
-  (its SVG nests an inner `<svg>` with its own viewBox, which the rasteriser
-  mis-places — the ring came out off-centre with a 7% stroke) and the
-  **animated mark** in the banner, whose 17 sweep frames are generated at build
-  time from the same 295 degree geometry and asserted against it - at the last
-  frame the sweep *is* the mark, gap open at 1 o'clock, or the build fails. Both are checked against the spec: ring extent 47.5% of the tile,
-  stroke 8.0%, optically centred.
-- **The mark is one stroke, and it never rotates.** The artwork ships as two
-  paths, but the second ends exactly where the first begins, so it is a single
-  295° stroke from 95° with one 65° gap — drawing it as two arcs leaves a seam
-  at the join. The banner traces that stroke on as it arrives and retraces it
-  away as it leaves. Rotating it would turn a ring buffer into a loading
-  spinner, so nothing spins.
-
-Type is Outfit for interface and JetBrains Mono for hotkeys, paths, durations
-and nab timestamps, at the published px scale. The installer places both
-per-user (open-licensed, no admin needed). Outfit exposes each weight as its
-own family to Windows, so weights 400/500/600 are selected by family rather
-than by asking Tk for "bold". If a face is ever missing, `brand.font()`
-degrades along the guidelines' own chain to system-ui and ui-monospace.
-
-The tray and the shortcuts both use the purple app tile, rendered per size so
-the 22.5% corner radius and 58% ring hold down to 16px; pausing desaturates the
-field and keeps the silhouette. (The guidelines prefer a monochrome template in
-a tray, on the grounds that Windows draws it over unknown wallpaper — the tile
-was the explicit choice here, and the same document argues the field treatment
-is what survives at small sizes.)
-
-## Verified
+<br>
 
 | Check | Result |
 |---|---|
@@ -414,6 +488,8 @@ exercised, the fallback path is not), and the exact `audio_offset_ms` value —
 the measurement rig's correlation was too weak to confirm it, so it is set from
 a reference measurement and exposed as a slider.
 
+</details>
+
 ## Running from source
 
 ```powershell
@@ -425,3 +501,13 @@ python nabd.py
 Python 3.10+. From source the app keeps its config, buffer and log beside the
 scripts rather than in `%LOCALAPPDATA%`, so a source checkout and an installed
 copy don't share state.
+
+---
+
+<div align="center">
+
+<img src="brand/render/nabd-app-tile-512.png" alt="" width="30">
+
+<sub>MIT · <a href="https://github.com/ethanbxi/Nabd/blob/master/SOUND.md">SOUND.md</a> · <a href="https://github.com/ethanbxi/Nabd/blob/master/THIRD-PARTY-NOTICES.md">Third-party notices</a></sub>
+
+</div>
