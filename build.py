@@ -87,6 +87,38 @@ def gather():
         import make_wizard_art
         make_wizard_art.main()
     print(f"  wizard art  {len(list(art.glob('wizard*.bmp')))} images")
+
+    # The save banner is drawn entirely from pre-rendered frames. Rendering
+    # them at launch would cost exactly what onedir was chosen to save, so they
+    # are built here. Regenerated only when missing - the assertion that frame
+    # 16 is the logo runs with them.
+    frames = APP / "assets" / "banner"
+    if not list(frames.glob("*/ring_16.png")):
+        import make_banner_assets
+        make_banner_assets.main(str(frames))
+    print(f"  banner art  {len(list(frames.glob('*/*.png')))} frames")
+
+    # The capture sound, checked rather than merely counted. Its length has to
+    # equal the banner's TOTAL_MS to the sample - async playback dies with the
+    # banner process, so a longer file loses its tail and a shorter one leaves
+    # the exit unscored - and winsound has no volume control, so the mastering
+    # level IS the playback level. Both are cheap to break by re-rendering and
+    # neither shows up until someone hears it.
+    import nabd_banner
+    import nabd_sound
+    if nabd_sound.DURATION_MS != nabd_banner.TOTAL_MS:
+        print(f"  sound       FAILED: nabd_sound.DURATION_MS is "
+              f"{nabd_sound.DURATION_MS}ms but the banner runs "
+              f"{nabd_banner.TOTAL_MS}ms - regenerate with synth5.py")
+        return False
+    wavs = sorted((APP / "assets" / "sound").glob("*.wav"))
+    for wav in wavs:
+        try:
+            nabd_sound.verify(wav)
+        except AssertionError as exc:
+            print(f"  sound       FAILED: {wav.name}: {exc}")
+            return False
+    print(f"  sound       {len(wavs)} verified at {nabd_sound.DURATION_MS}ms")
     return True
 
 

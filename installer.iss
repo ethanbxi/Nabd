@@ -8,7 +8,7 @@
 
 #define AppName "Nab'd"
 #define AppShortName "Nabd"
-#define AppVersion "1.0.0"
+#define AppVersion "2.0.0"
 #define AppPublisher "Nab'd"
 #define AppExe "Nabd.exe"
 
@@ -84,7 +84,24 @@ Name: "{group}\{#AppName} Settings"; Filename: "{app}\{#AppExe}"; \
     Parameters: "--settings"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; \
     Tasks: desktopicon
-Name: "{userstartup}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: startup
+
+[Registry]
+; Autostart from the Run key rather than a Startup-folder shortcut. Explorer
+; processes Run before the Startup folder, and the nab hotkey is claimed with
+; RegisterHotKey, which is first-come-first-served with no way to outrank an
+; earlier claimant - starting last meant every overlay and rival clip recorder
+; on the machine had already taken its pick of the keys. (A logon scheduled
+; task would start earlier still, but creating one needs admin, which would
+; cost this installer its no-UAC install.)
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
+    ValueType: string; ValueName: "{#AppShortName}"; \
+    ValueData: """{app}\{#AppExe}"""; \
+    Flags: uninsdeletevalue; Tasks: startup
+
+[InstallDelete]
+; Older builds autostarted from the Startup folder; drop it so an upgrade does
+; not leave two launches racing each other.
+Type: files; Name: "{userstartup}\{#AppName}.lnk"
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Start {#AppName} now"; \

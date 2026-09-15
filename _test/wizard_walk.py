@@ -17,7 +17,10 @@ from pathlib import Path
 from PIL import ImageGrab
 
 APP = Path(__file__).resolve().parent.parent
-SETUP = APP / "dist" / "NabdSetup-1.0.0.exe"
+# Newest build, not a pinned name: this went stale the moment the
+# version moved.
+SETUP = max((APP / "dist").glob("NabdSetup-*.exe"),
+            key=lambda p: p.stat().st_mtime, default=None)
 SHOTS = APP / "_test" / "wizard"
 TITLE = "Setup - Nab'd"
 

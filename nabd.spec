@@ -16,6 +16,17 @@ APP = Path(os.getcwd())
 FFMPEG = APP / "vendor" / "ffmpeg.exe"
 
 datas = [(str(APP / "brand" / "render" / "*.png"), "brand/render")]
+# The banner's frames, one directory per DPI scale and field colour. Kept as
+# loose PNGs rather than packed: the banner loads only the set it needs.
+for _d in sorted((APP / "assets" / "banner").glob("*")):
+    if _d.is_dir():
+        datas.append((str(_d / "*.png"), f"assets/banner/{_d.name}"))
+# The capture sound. nabd_sound.asset_dir() resolves sys._MEIPASS when
+# frozen and the module's own directory from source, so this path is the one
+# it looks in either way. synth5.py generates these and needs numpy+scipy -
+# it is a build-time tool and must not be imported by anything that ships.
+if (APP / "assets" / "sound").is_dir():
+    datas.append((str(APP / "assets" / "sound" / "*.wav"), "assets/sound"))
 if FFMPEG.exists():
     datas.append((str(FFMPEG), "ffmpeg"))
 fonts = APP / "vendor" / "fonts"
@@ -28,7 +39,9 @@ a = Analysis(
     binaries=[],
     datas=datas,
     hiddenimports=[
-        "settings", "banner", "theme", "brand",
+        "settings", "banner", "brand",
+        "nabd_tokens", "nabd_paint", "nabd_ui",
+        "nabd_banner", "nabd_ease", "nabd_panel_open",
         "pyaudiowpatch", "pystray._win32",
         "PIL.ImageTk", "PIL._tkinter_finder",
         "tkinter", "tkinter.filedialog", "tkinter.font",

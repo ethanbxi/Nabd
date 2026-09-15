@@ -51,6 +51,15 @@ BUFFER_DIR = DATA_DIR / "buffer"
 CONFIG_PATH = DATA_DIR / "config.json"
 LOG_PATH = DATA_DIR / "nabd.log"
 BANNER_TRIGGER = DATA_DIR / ".banner_trigger"
+SETTINGS_TRIGGER = DATA_DIR / ".settings_trigger"
+AV_TEST_TRIGGER = DATA_DIR / ".av_test"
+# The settings panel asks us to let go of the nab keys while it listens for a
+# new one. Holds a deadline, so a panel that dies mid-capture cannot leave the
+# hotkeys off for the rest of the session.
+HOTKEY_HOLD = DATA_DIR / ".hotkeys_held"
+# Not the clips folder: recent nabs globs *.mp4 there, and a test pattern is
+# not a nab. One name, overwritten, so they cannot pile up either.
+AV_TEST_CLIP = DATA_DIR / "av_sync_test.mp4"
 
 
 def helper_command(module, *args):
@@ -154,7 +163,19 @@ DEFAULTS = {
     "clip_seconds": 300,
     # alt+f9 / alt+f10 belong to NVIDIA ShadowPlay, so neither is a safe
     # default; Insert is free and one-handed.
-    "hotkey": "insert",
+    # Not Insert. It is the obvious key for this and that is exactly the
+    # problem: every overlay and rival clip recorder claims it at logon, and
+    # RegisterHotKey is first-come-first-served with no way to outrank an
+    # earlier claimant. On the machine this was built on, Insert was gone
+    # before Nab'd started every single time, so the app looked dead when it
+    # was only blocked. A modifier puts it somewhere nothing else is sitting.
+    "hotkey": "alt+insert",
+    # Optional second combo for the same action. Its reason to exist is that
+    # RegisterHotKey is first-come-first-served: when the key you actually want
+    # is held by another app, Nab'd keeps asking for it in the background while
+    # this one carries on working, and the moment the other app lets go the
+    # primary starts firing too.
+    "hotkey_alt": "",
     "open_hotkey": "ctrl+alt+n",  # bring up the settings panel
     "output_dir": "",
     "monitor": 0,
@@ -172,14 +193,36 @@ DEFAULTS = {
     # Measured on this machine: audio landed ~165-190 ms behind video against a
     # flash/tone reference. Capture latency accounts for only part of that, so
     # this is a starting point rather than a constant of nature - the settings
-    # panel exposes it as a slider.
-    "audio_offset_ms": -150,
+    # panel exposes it as a slider, and it trims around AUDIO_BASELINE_MS
+    # rather than standing on its own - so 0 is the calibrated setting, not
+    # the uncorrected one.
+    "audio_offset_ms": 0,
+    # Bumped when a stored config needs rewriting rather than merely
+    # defaulting. 2 rebased audio_offset_ms onto the baseline below.
+    "config_version": 2,
     "segment_seconds": 2,
     "save_delay": 3.0,   # settle time so the keypress moment is on disk
     "reset_after_clip": False,  # start a fresh buffer once a clip is saved
     "notify": True,
+    # A sound that defaults off is a sound nobody finds. "off" silences it; a
+    # path ending in .wav is the user's own file; anything else names a
+    # built-in. nabd_sound.resolve() is the one place that decides.
+    "capture_sound": "pip",
     "banner_delay": 0.2,  # beat before the confirmation slides in
 }
+
+# What the capture pipeline is out by before anyone touches a slider, in ms.
+# Negative pulls audio earlier. Measured rather than guessed: flashes drawn and
+# clicks played at known instants, recorded through the real pipeline, and the
+# separation read back out of the file - about +120ms of audio lateness on top
+# of a -150 setting, so roughly -270 of correction, and -200 was where it
+# stopped being audible.
+#
+# It lives here rather than in the default so that the slider trims around it.
+# A default is a number the user is invited to change; this is the shape of the
+# pipeline, and starting everyone 200ms out to be discovered one at a time was
+# not a setting, it was a bug with a control attached.
+AUDIO_BASELINE_MS = -200
 
 # Changing any of these means the ffmpeg pipeline has to be rebuilt.
 CAPTURE_KEYS = {
@@ -192,6 +235,20 @@ CAPTURE_KEYS = {
 class _GUID(ctypes.Structure):
     _fields_ = [("d1", wintypes.DWORD), ("d2", wintypes.WORD),
                 ("d3", wintypes.WORD), ("d4", ctypes.c_ubyte * 8)]
+
+
+def clock(seconds):
+    """300 -> '5:00'. The banner shows nab length this way."""
+    seconds = max(0, int(seconds))
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def human_size(n):
+    """1024-based, to match what Explorer shows."""
+    for unit, size in (("GB", 1 << 30), ("MB", 1 << 20)):
+        if n >= size:
+            return f"{n / size:.1f} {unit}"
+    return f"{n / 1024:.0f} KB"
 
 
 def videos_dir():
@@ -221,11 +278,27 @@ def videos_dir():
 def load_config():
     cfg = dict(DEFAULTS)
     first_run = not CONFIG_PATH.exists()
+    stored = {}
     if not first_run:
         try:
-            cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
+            stored = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            cfg.update(stored)
         except (OSError, ValueError) as exc:
             log(f"config unreadable ({exc}); using defaults")
+    # The slider used to stand on its own and now trims around
+    # AUDIO_BASELINE_MS, so a stored number means 200ms less than it did.
+    # Rebased once, from the raw file rather than the merged dict - a missing
+    # version key is indistinguishable from the current one after the merge.
+    if not first_run and int(stored.get("config_version", 1)) < 2:
+        was = int(cfg.get("audio_offset_ms", 0))
+        cfg["audio_offset_ms"] = was - AUDIO_BASELINE_MS
+        cfg["config_version"] = 2
+        log(f"A/V sync rebased onto the {AUDIO_BASELINE_MS}ms baseline: "
+            f"{was} -> {cfg['audio_offset_ms']} (same recording as before)")
+        try:
+            save_config(cfg)
+        except OSError as exc:
+            log(f"could not store the rebased config: {exc}")
     if not cfg["output_dir"]:
         cfg["output_dir"] = str(videos_dir() / APP_NAME)
     if first_run:
@@ -599,13 +672,19 @@ class _InputTrack:
     # directly on how late the audio is against the video.
     CHUNK = 256
 
-    def __init__(self, label, resolve, optional=False):
+    def __init__(self, label, resolve, optional=False, silence_ok=False):
         self.label = label
         self.resolve = resolve
         self.optional = optional
+        # A loopback endpoint only fires while something is playing, so for
+        # those tracks a long gap means the desktop is quiet, not broken.
+        self.silence_ok = silence_ok
         self.chunks = queue.Queue(maxsize=64)
         self.last_data = 0.0
         self.device_name = None
+        self.device_index = None
+        self.stream = None
+        self.checked_at = 0.0
         self.live = False
         self._rate = RATE
         self._channels = CHANNELS
@@ -625,9 +704,27 @@ class _InputTrack:
             log(f"{self.label}: {name} "
                 f"({self._rate} Hz, {self._channels} ch)")
         self.device_name = name
+        self.device_index = dev["index"]
+        self.stream = stream
         self.last_data = time.perf_counter()
         self.live = True
         return stream
+
+    def active(self):
+        """Is the stream still open? The only liveness signal a silent
+        loopback has, since it delivers no callbacks to time out on."""
+        try:
+            return bool(self.stream and self.stream.is_active())
+        except Exception:
+            return False
+
+    def moved(self, pa):
+        """Has Windows pointed this endpoint somewhere else since we opened?"""
+        try:
+            dev, _ = self.resolve(pa)
+        except Exception:
+            return False
+        return dev["index"] != self.device_index
 
     def _normalise(self, data):
         """Whatever the device hands us -> 48kHz stereo."""
@@ -668,11 +765,19 @@ class AudioMixer:
     video source - measured at roughly a third of the target frame rate.
     """
 
-    # A working endpoint delivers buffers continuously, even through silence.
-    # Going quiet for longer than this means the endpoint died rather than that
-    # nothing is playing - a sleeping wireless headset, or the user switching
-    # their default output out from under us.
+    # A capture device delivers buffers continuously, even through silence, so
+    # going quiet for longer than this means that endpoint died. This does NOT
+    # hold for loopback: WASAPI only fires a loopback callback while something
+    # is actually playing, so an idle desktop delivers nothing at all and must
+    # not be mistaken for a dead endpoint - see _loopback_fault.
     STALL_SECONDS = 2.0
+    # How often to re-resolve a loopback's endpoint to notice an output switch.
+    DEVICE_POLL = 5.0
+    # PortAudio enumerates devices once per instance, so an output switch it
+    # never saw can only be found by standing the instance back up. This is the
+    # backstop for that, and the reason it is minutes rather than seconds: on a
+    # quiet desktop it is the only thing that rebuilds at all.
+    IDLE_REBUILD = 60.0
     REBUILD_GRACE = 5.0
     MAX_BACKOFF = 30.0
     RETRY_MISSING = 30.0
@@ -689,7 +794,8 @@ class AudioMixer:
         # -itsoffset because aresample's first_pts=0 re-anchors the stream and
         # throws an input timestamp shift away.
         self.offset = float(offset_ms) / 1000.0
-        self.desktop = _InputTrack("desktop audio", _resolve_loopback(speaker))
+        self.desktop = _InputTrack("desktop audio", _resolve_loopback(speaker),
+                                   silence_ok=True)
         self.mic = (_InputTrack("microphone", _resolve_mic(mic), optional=True)
                     if mic is not None else None)
         self._stdin = None
@@ -737,6 +843,26 @@ class AudioMixer:
         pending += sum(len(c) for c in list(self.desktop.chunks.queue))
         return pending / BYTES_PER_SEC
 
+    def _loopback_fault(self, track, pa, now):
+        """Why this loopback needs rebuilding, or None if it is merely quiet.
+
+        WASAPI raises a loopback callback only while audio is actually
+        playing, so an idle desktop delivers no buffers whatsoever. Timing that
+        out as a dead endpoint is what used to tear the capture down - and the
+        microphone with it, since the tracks are rebuilt together - every few
+        seconds on a quiet machine.
+        """
+        if not track.active():
+            return "endpoint closed"
+        if now - track.checked_at < self.DEVICE_POLL:
+            return None
+        track.checked_at = now
+        if track.moved(pa):
+            return "output device changed"
+        if now - track.last_data > self.IDLE_REBUILD:
+            return "quiet for a while; re-checking devices"
+        return None
+
     def _supervisor(self):
         """Own every capture stream, and rebuild them together when one dies.
 
@@ -762,20 +888,31 @@ class AudioMixer:
 
                 opened_at = time.perf_counter()
                 grace = min(self.REBUILD_GRACE * (2 ** misses), self.MAX_BACKOFF)
+                for track in self._tracks():
+                    track.checked_at = opened_at
+                fault = None
                 while not self._stop.is_set():
                     time.sleep(0.25)
                     now = time.perf_counter()
-                    stalled = None
                     for track in self._tracks():
                         if not track.live:
                             continue
+                        if track.silence_ok:
+                            # Silence proves nothing here, so this track can
+                            # never time out; it is judged on whether its
+                            # stream is still open and still the right device.
+                            got_audio = True
+                            reason = self._loopback_fault(track, pa, now)
+                            if reason and not fault:
+                                fault = (track, reason)
+                            continue
                         if now - track.last_data < self.STALL_SECONDS:
                             got_audio = True
-                        elif now - opened_at > grace:
-                            stalled = track
-                    if stalled:
+                        elif now - opened_at > grace and not fault:
+                            fault = (track, "stalled")
+                    if fault:
                         self._reopens += 1
-                        log(f"{stalled.label} stalled; rebuilding audio")
+                        log(f"{fault[0].label} {fault[1]}; rebuilding audio")
                         break
                     # Give a device that was missing at startup another chance.
                     if (any(not t.live for t in self._tracks())
@@ -989,7 +1126,7 @@ class Recorder:
                 mic=self.cfg["mic_device"] if self.cfg["capture_mic"] else None,
                 desktop_gain=self.cfg["desktop_volume"],
                 mic_gain=self.cfg["mic_volume"],
-                offset_ms=self.cfg["audio_offset_ms"])
+                offset_ms=AUDIO_BASELINE_MS + self.cfg["audio_offset_ms"])
             self.audio.start(self.proc.stdin)
             threading.Thread(target=self._drain_stderr, args=(self.proc,), daemon=True).start()
             threading.Thread(target=self._drain_progress, args=(self.proc,), daemon=True).start()
@@ -1238,12 +1375,19 @@ class Clipper:
                 pass
         log(f"buffer reset after nab ({dropped} segments dropped)")
 
-    def save(self, on_done=None):
+    def save(self, on_done=None, on_early=None, seconds=None, out_path=None):
         """Returns whether a save actually started, so the caller can confirm
-        to the user immediately rather than waiting for the settle delay."""
+        to the user immediately rather than waiting for the settle delay.
+
+        `seconds` and `out_path` are for the A/V sync test, which wants a short
+        window and a file of its own rather than the user's whole buffer
+        dropped into their clips folder.
+        """
         if not self._busy.acquire(blocking=False):
             return False
-        threading.Thread(target=self._save, args=(on_done,), daemon=True).start()
+        threading.Thread(target=self._save,
+                         args=(on_done, on_early, seconds, out_path),
+                         daemon=True).start()
         return True
 
     def _settle(self):
@@ -1261,22 +1405,41 @@ class Clipper:
             # is guaranteed to have been closed and flushed by the time we read.
             time.sleep(delay)
 
-    def _save(self, on_done):
+    def _save(self, on_done, on_early=None, seconds=None, out_path=None):
         work = None
         try:
-            self._settle()
             seg = self.cfg["segment_seconds"]
+            want = float(seconds or self.cfg["clip_seconds"])
+            wanted = max(1, int(round(want / seg)))
+
+            # Name the file and report the figures before the settle, not
+            # after assembly. The segments that will be concatenated are
+            # already on disk and -c copy alters their size only by container
+            # overhead, so the length and the size are both knowable now -
+            # while there is still a banner to put them on. The timestamp is
+            # the moment the key was pressed, which is the honest one.
+            if out_path:
+                out = Path(out_path)
+            else:
+                out = (Path(self.cfg["output_dir"])
+                       / f"nab_{datetime.now():%Y-%m-%d_%H-%M-%S}.mp4")
+            out.parent.mkdir(parents=True, exist_ok=True)
+            if on_early:
+                early = self.segments()[-(wanted + 1):]
+                if early:
+                    try:
+                        on_early(len(early) * seg,
+                                 sum(p.stat().st_size for p in early), out)
+                    except OSError:
+                        pass
+
+            self._settle()
             files = self.segments()
             if len(files) < 2:
                 self._finish(on_done, False, "buffer still filling")
                 return
 
-            wanted = max(1, int(round(self.cfg["clip_seconds"] / seg)))
             chosen = files[-(wanted + 1):]
-
-            out_dir = Path(self.cfg["output_dir"])
-            out_dir.mkdir(parents=True, exist_ok=True)
-            out = out_dir / f"nab_{datetime.now():%Y-%m-%d_%H-%M-%S}.mp4"
 
             # ffmpeg still holds the newest segment open. Copy the set aside so
             # concat reads stable bytes and the janitor can't delete underneath.
@@ -1318,9 +1481,13 @@ class Clipper:
             secs = len(staged) * seg
             mb = out.stat().st_size / (1024 * 1024)
             log(f"saved {out.name}  ~{secs}s  {mb:.1f}MB")
-            if self.cfg.get("reset_after_clip"):
+            # Not for the A/V test: running a sync check should not throw
+            # away the replay buffer the user is actually keeping.
+            if self.cfg.get("reset_after_clip") and not out_path:
                 self._drop_through(chosen[-1])
-            self._finish(on_done, True, f"{out.name}  ({secs // 60}m {secs % 60}s)")
+            self._finish(on_done, True,
+                         f"{out.name}  ({secs // 60}m {secs % 60}s)",
+                         seconds=secs, size=out.stat().st_size, path=out)
         except Exception as exc:
             log(f"nab error: {exc}")
             self._finish(on_done, False, str(exc))
@@ -1329,10 +1496,10 @@ class Clipper:
                 shutil.rmtree(work, ignore_errors=True)
             self._busy.release()
 
-    def _finish(self, on_done, ok, detail):
+    def _finish(self, on_done, ok, detail, seconds=None, size=None, path=None):
         if on_done:
             try:
-                on_done(ok, detail)
+                on_done(ok, detail, seconds, size, path)
             except Exception:
                 pass
 
@@ -1396,7 +1563,12 @@ class HotkeyListener(threading.Thread):
 
     RETRY_SECONDS = 5.0
 
-    def __init__(self, spec, callback, hotkey_id=1):
+    # Posted to the listener's own thread to make it re-read `hold`.
+    # UnregisterHotKey only works from the thread that registered, so the
+    # decision can be made anywhere but the act has to happen there.
+    WM_SYNC = 0x8001                      # WM_APP + 1
+
+    def __init__(self, spec, callback, hotkey_id=1, hold=None):
         super().__init__(daemon=True)
         self.mods, self.vk = parse_hotkey(spec)
         self.spec = spec
@@ -1407,8 +1579,34 @@ class HotkeyListener(threading.Thread):
         self.ok = threading.Event()
         self.error = None
         self.registered = False
+        self.hold = hold or threading.Event()
+        self.suspended = False       # let go on purpose, not lost to a rival
         self._tid = None
         self._quit = threading.Event()
+
+    def sync(self):
+        """Ask the listener to match its registration to `hold`."""
+        if self._tid:
+            ctypes.windll.user32.PostThreadMessageW(self._tid, self.WM_SYNC,
+                                                    0, 0)
+
+    def _sync_hold(self):
+        user32 = ctypes.windll.user32
+        if self.hold.is_set():
+            if self.registered:
+                user32.UnregisterHotKey(None, self.hotkey_id)
+                self.registered = False
+                self.suspended = True
+        elif self.suspended:
+            self.suspended = False
+            if user32.RegisterHotKey(None, self.hotkey_id, self.mods,
+                                     self.vk):
+                self.registered = True
+            else:
+                # Someone took it while we were not holding it. Back to the
+                # same retry the first claim uses.
+                self.error = (f"hotkey {self.spec!r} is in use by another "
+                              f"app; retrying in the background")
 
     def run(self):
         user32 = ctypes.windll.user32
@@ -1418,6 +1616,12 @@ class HotkeyListener(threading.Thread):
         # and release it later, so a first failure is not fatal - keep trying.
         attempts = 0
         while not self._quit.is_set():
+            if self.hold.is_set():
+                # The panel is listening for a key. Claiming one now would
+                # take it right back out of the window it is being typed into.
+                self.suspended = True
+                self._quit.wait(0.1)
+                continue
             if user32.RegisterHotKey(None, self.hotkey_id, self.mods, self.vk):
                 self.registered = True
                 if attempts:
@@ -1438,8 +1642,13 @@ class HotkeyListener(threading.Thread):
         msg = wintypes.MSG()
         try:
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-                if msg.message == WM_HOTKEY:
-                    self.callback()
+                if msg.message == self.WM_SYNC:
+                    self._sync_hold()
+                elif msg.message == WM_HOTKEY:
+                    # Checked as well as unregistered: a press already queued
+                    # when the hold went on would otherwise still nab.
+                    if not self.hold.is_set():
+                        self.callback()
         finally:
             user32.UnregisterHotKey(None, self.hotkey_id)
             self.registered = False
@@ -1474,6 +1683,7 @@ class Tray:
         self.app = app
         self.cfg = app.cfg
         self.startup_warning = None
+        self._settings = None      # resident panel helper
         self.icon = pystray.Icon(
             APP_NAME, make_icon(False), DISPLAY_NAME,
             menu=pystray.Menu(
@@ -1494,7 +1704,33 @@ class Tray:
             ),
         )
 
+    def _blocked_key(self):
+        """The nab hotkey, if another app got to it first.
+
+        The listener keeps retrying in the background, so this can clear on its
+        own - which is why it is asked for fresh each time rather than latched
+        at startup.
+        """
+        hk = getattr(self.app, "hotkey", None)
+        if hk is None or hk.registered:
+            return None
+        return hk.spec
+
+    def _working_key(self):
+        """A key that is actually claimed, or None. The backup is only worth
+        naming if it registered - it competes for keys on the same terms."""
+        for hk in (getattr(self.app, "hotkey", None),
+                   getattr(self.app, "alt_hotkey", None)):
+            if hk is not None and hk.registered:
+                return hk.spec
+        return None
+
     def _status(self, _):
+        blocked = self._blocked_key()
+        if blocked:
+            alt = self._working_key()
+            return (f"'{blocked}' is taken by another app"
+                    + (f" - use {alt}" if alt else " - set another in Settings"))
         if not self.app.recorder.running:
             return "Paused - click to resume"
         have = int(self.app.recorder.buffered_seconds)
@@ -1505,7 +1741,12 @@ class Tray:
 
     def _save_label(self, _):
         mins = int(self.cfg["clip_seconds"]) // 60
-        return f"Nab last {mins} min  ({self.cfg['hotkey']})"
+        # Naming a key that was never claimed is worse than naming none: it is
+        # the reason the app looks broken instead of blocked.
+        key = self.cfg["hotkey"]
+        if self._blocked_key():
+            key = self._working_key() or "no key"
+        return f"Nab last {mins} min  ({key})"
 
     def notify(self, title, message):
         if not self.cfg["notify"]:
@@ -1517,6 +1758,14 @@ class Tray:
 
     def refresh(self):
         self.icon.icon = make_icon(self.app.recorder.running)
+        # The tooltip is the only part of a tray app you can read without
+        # clicking it, so the trouble goes there too.
+        blocked = self._blocked_key()
+        try:
+            self.icon.title = (f"{DISPLAY_NAME} - '{blocked}' is taken by "
+                               f"another app" if blocked else DISPLAY_NAME)
+        except Exception:
+            pass
         self.icon.update_menu()
 
     def _toggle(self):
@@ -1535,17 +1784,7 @@ class Tray:
         os.startfile(path)
 
     def open_settings(self):
-        """Run the UI out of process - tkinter and pystray cannot share a
-        main thread, and a crash in the dialog must not take recording down."""
-        try:
-            proc = subprocess.Popen(helper_command("settings"),
-                                    cwd=str(ASSET_DIR))
-            # Hand our foreground rights to the panel. Without this Windows
-            # refuses to let it come to the front, and it cannot tell that the
-            # user has clicked away.
-            ctypes.windll.user32.AllowSetForegroundWindow(proc.pid)
-        except OSError as exc:
-            log(f"could not open settings: {exc}")
+        self.app.open_settings()
 
     def _view_log(self):
         LOG_PATH.touch(exist_ok=True)
@@ -1555,7 +1794,25 @@ class Tray:
         self.icon.visible = False
         self.icon.stop()
 
+    @staticmethod
+    def _tray_ready(timeout=60.0):
+        """Wait for a notification area to put an icon into.
+
+        Shell_NotifyIcon has nowhere to go until Explorer has built the
+        taskbar, and it reports that by failing rather than by waiting. At
+        logon this app is well inside the window where that is still true.
+        """
+        user32 = ctypes.windll.user32
+        end = time.time() + timeout
+        while time.time() < end:
+            if user32.FindWindowW("Shell_TrayWnd", None):
+                return True
+            time.sleep(0.5)
+        return False
+
     def run(self):
+        if not self._tray_ready():
+            log("no taskbar after 60s; showing the tray icon anyway")
         self.icon.run(setup=self._setup)
 
     def _setup(self, icon):
@@ -1571,10 +1828,26 @@ class Tray:
             try:
                 self.app.clipper.prune()
                 self.app.poll_config()
+                self.app.poll_av_test()
                 self.app.ensure_banner_helper()
+                self._keep_icon()
                 self.refresh()
             except Exception:
                 pass
+
+    def _keep_icon(self):
+        """Put the icon back if it is not there.
+
+        Covers both the logon race and an Explorer restart, which takes every
+        tray icon with it and tells nobody. Cheap: this is a flag check until
+        the day it is not.
+        """
+        try:
+            if not self.icon.visible:
+                self.icon.visible = True
+                log("tray icon was missing; re-added")
+        except Exception:
+            pass
 
 
 # --------------------------------------------------------------------------
@@ -1589,8 +1862,13 @@ class App:
         self.clipper = Clipper(cfg, ffmpeg, self.recorder)
         self.tray = Tray(self)
         self.hotkey = None
+        self.alt_hotkey = None
         self.open_hotkey = None
         self._banner = None
+        self._settings = None
+        # Set while the settings panel is listening for a key. Shared by every
+        # listener, so one flag lets go of all of them at once.
+        self._hold = threading.Event()
         self._job = create_kill_on_close_job()
         self._cfg_stamp = self._stamp()
 
@@ -1621,25 +1899,126 @@ class App:
             log(f"banner helper failed to start: {exc}")
             self._banner = None
 
-    def show_banner(self, text, ok=True):
-        """Fire-and-forget: a file write, so the keypress feels immediate."""
+    def show_banner(self, title, detail="", ok=True, token="", sound=None):
+        """Fire-and-forget: a file write, so the keypress feels immediate.
+
+        `token` names which nab this banner belongs to, so figures that arrive
+        later can only land on the banner they were measured from.
+
+        `sound` overrides what the banner plays. Colour and sound are not the
+        same decision: "Still saving" is not a failure and should not be red,
+        but it is not a confirmation either and must not chime.
+        """
         if not self.cfg["notify"]:
             return
         self.ensure_banner_helper()
-        try:
-            BANNER_TRIGGER.write_text(
-                json.dumps({"text": text, "kind": "ok" if ok else "fail",
+        # Kept so an update can carry it too. The helper polls the trigger
+        # every 40ms and the figures follow the banner within milliseconds, so
+        # both writes can land between two polls; an update that describes the
+        # whole banner can raise it rather than being dropped as an orphan.
+        self._banner_base = {
+            "title": title, "kind": "ok" if ok else "fail",
+            "monitor": int(self.cfg["monitor"]),
+            "delay": float(self.cfg.get("banner_delay", 0.2)),
+            # The helper is long-lived and holds no config of its own, so the
+            # choice rides with the payload rather than being read at the far
+            # end - where it would be whatever it was when the helper started.
+            "sound": ((self.cfg.get("capture_sound", "pip") if ok else "off")
+                      if sound is None else sound),
+            "token": token}
+        self._write_banner(dict(self._banner_base, detail=detail))
+
+    def update_banner(self, detail, path=None, ready=False, token=""):
+        """Fill in the figures on the banner already running.
+
+        Edits the line in place rather than restarting the timeline. `ready`
+        says the file is closed and safe to open - assembly runs for tens of
+        seconds after the figures are known, and a click before then would
+        open a half-written nab.
+
+        The base is rebuilt around this nab's own token rather than read from
+        whatever show_banner set last. Assembly runs for tens of seconds, and
+        anything can raise a banner in the meantime - a capture fault, another
+        nab - so the figures used to land on whatever was on screen: a
+        "Capture Lost" card would take the nab's size, path and hand cursor
+        and say "5:00 - 1.2 GB" instead of what went wrong.
+        """
+        if not self.cfg["notify"]:
+            return
+        self._write_banner({"update": True, "detail": detail,
+                            "token": token,
+                            "title": "Nabbed", "kind": "ok",
                             "monitor": int(self.cfg["monitor"]),
-                            "delay": float(self.cfg.get("banner_delay", 0.2))}),
-                encoding="utf-8")
+                            "delay": float(self.cfg.get("banner_delay", 0.2)),
+                            # Carried because this payload can end up RAISING
+                            # the banner rather than updating one: the figures
+                            # follow show_banner by a few milliseconds and the
+                            # helper polls every 40ms, so this is usually the
+                            # only write it sees. Without it the banner that
+                            # actually appeared was the silent one.
+                            "sound": self.cfg.get("capture_sound", "pip"),
+                            "path": str(path) if path else "",
+                            "ready": bool(ready)})
+
+    def _write_banner(self, payload):
+        # Written aside and renamed over: write_text truncates first, so the
+        # helper's 40ms poll could stat a new mtime and then read an empty or
+        # half-written file - measured a ~93us torn window per write, and a
+        # torn read commits the new stamp and drops the payload for good.
+        # os.replace is atomic, so the mtime only changes once the bytes are
+        # all there.
+        tmp = BANNER_TRIGGER.with_suffix(".tmp")
+        try:
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
         except OSError as exc:
             log(f"banner trigger failed: {exc}")
+            return
+        # The helper reads this file every 40ms, and a rename over a file
+        # somebody has open fails outright on Windows - "Access is denied" -
+        # rather than waiting. The two writes of a single nab land a few
+        # milliseconds apart, so that collision is not rare; it is what made
+        # banners go missing. The reader holds it for microseconds, so a short
+        # retry is all it takes.
+        for attempt in range(20):
+            try:
+                os.replace(tmp, BANNER_TRIGGER)
+                return
+            except PermissionError:
+                time.sleep(0.005)
+            except OSError as exc:
+                log(f"banner trigger failed: {exc}")
+                break
+        else:
+            log("banner trigger failed: the helper held it for 100ms")
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
-    def _clip_done(self, ok, detail):
+    def _clip_early(self, seconds, size, path, token=""):
+        """The figures, as soon as they are knowable.
+
+        Which is within milliseconds of the keypress - the segments that will
+        be concatenated are already on disk. Waiting for ffmpeg means waiting
+        9-29s for a five minute nab, by which time the banner they belong on
+        has been gone for half a minute.
+        """
+        self.update_banner(f"{clock(seconds)} · {human_size(size)}", path,
+                           ready=False, token=token)
+
+    def _clip_done(self, ok, detail, seconds=None, size=None, path=None,
+                   token=""):
         # Success was already confirmed the instant the key was pressed; only
-        # speak up again if it turned out badly.
+        # speak up again if it turned out badly - or to fill in the figures,
+        # which are not known until the file is on disk.
         if not ok:
-            self.show_banner(f"Nab Failed - {detail}", ok=False)
+            self.show_banner("Nab Failed", detail, ok=False)
+            return
+        if seconds is not None and size is not None:
+            # Same line again with the exact size, and the nab now safe to
+            # open. Usually the banner has already gone; the helper ignores it.
+            self.update_banner(f"{clock(seconds)} · {human_size(size)}",
+                               path, ready=True, token=token)
 
     def save_clip(self):
         """Confirm immediately, assemble in the background.
@@ -1647,34 +2026,203 @@ class App:
         Assembly deliberately waits for the newest segment to flush, but that
         delay should not sit between the keypress and the feedback.
         """
-        if not self.clipper.save(on_done=self._clip_done):
+        # One token per nab, bound into the callbacks, so the figures that
+        # come back tens of seconds later can only be applied to this nab's
+        # own banner.
+        self._nab_seq = getattr(self, "_nab_seq", 0) + 1
+        token = "nab%d" % self._nab_seq
+        if not self.clipper.save(
+                on_done=lambda *a, **k: self._clip_done(*a, token=token, **k),
+                on_early=lambda *a, **k: self._clip_early(*a, token=token, **k)):
+            # Silence here reads as a dead app. A five minute nab takes twenty
+            # to thirty seconds to concatenate and the hotkey is refused for
+            # all of it, so the press after a long nab did nothing at all - no
+            # banner, no sound, nothing but a line in a log nobody reads. This
+            # machine's log has 22 of them.
             log("nab already in progress; ignoring")
+            self.show_banner("Still saving", "the last nab is being written",
+                             ok=True, token=token, sound="off")
             return
         log("nab requested")
-        mins = max(1, int(round(self.cfg["clip_seconds"] / 60)))
-        unit = "Minute" if mins == 1 else "Minutes"
-        self.show_banner(f"Nab'd Last {mins} {unit}", ok=True)
+        # The length is known now; the size follows from _clip_done.
+        self.show_banner("Nabbed", clock(int(self.cfg["clip_seconds"])),
+                         ok=True, token=token)
+
+    def poll_hotkey_hold(self):
+        """Let go of the nab keys while the panel is listening for one.
+
+        Polled on its own thread rather than on the 3s tick: the user clicks
+        the field and presses a key immediately, and three seconds of that is
+        three seconds of taking nabs instead of reading the key.
+
+        The note carries a deadline. A panel that dies mid-capture would
+        otherwise leave the hotkeys off until the app restarted.
+        """
+        want = False
+        try:
+            raw = HOTKEY_HOLD.read_text(encoding="utf-8").strip()
+            want = float(raw) > time.time()
+        except (OSError, ValueError):
+            want = False
+        if want == self._hold.is_set():
+            return
+        if want:
+            self._hold.set()
+        else:
+            self._hold.clear()
+        log("nab hotkeys %s" % ("released for the settings panel" if want
+                                else "reclaimed"))
+        for listener in (self.hotkey, self.alt_hotkey, self.open_hotkey):
+            if listener is not None:
+                listener.sync()
+
+    def _watch_hotkey_hold(self):
+        while True:
+            time.sleep(0.15)
+            try:
+                self.poll_hotkey_hold()
+            except Exception:
+                pass
+
+    def poll_av_test(self):
+        """The settings panel asks for an A/V sync clip by leaving a note.
+
+        The note says WHEN to save, not "save now": the panel writes it before
+        it starts drawing, and the pattern then takes a quarter of a minute.
+        Naming the moment gives this poll - which only runs every few seconds -
+        that whole window to notice, instead of racing it.
+        """
+        try:
+            raw = AV_TEST_TRIGGER.read_text(encoding="utf-8").split()
+            AV_TEST_TRIGGER.unlink()
+        except OSError:
+            return
+        try:
+            at, seconds = float(raw[0]), int(raw[1])
+        except (IndexError, ValueError):
+            return
+        # Both directions. A note from the future is nonsense, but one from the
+        # PAST is the dangerous case: if the daemon was down when the panel
+        # wrote it - or the card was killed part way - the note outlives its
+        # own moment, and firing it on the next tick saves whatever happens to
+        # be on screen and opens a video player over the top of it.
+        drift = at - time.time()
+        if drift > 120 or drift < -60:
+            return
+        threading.Thread(target=self._av_test, args=(at, seconds),
+                         daemon=True).start()
+
+    def _av_test(self, at, seconds):
+        wait = at - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        log("A/V sync test: saving %ds" % seconds)
+        if not self.clipper.save(on_done=self._av_done, seconds=seconds,
+                                 out_path=AV_TEST_CLIP):
+            log("A/V sync test: a nab was already in progress")
+
+    @staticmethod
+    def _av_done(ok, detail=None, seconds=None, size=None, path=None):
+        """Open it - a test you have to go and find is a test nobody looks
+        at."""
+        if not ok:
+            log(f"A/V sync test failed: {detail}")
+            return
+        try:
+            os.startfile(path or AV_TEST_CLIP)
+        except OSError as exc:
+            log(f"A/V sync test saved but would not open: {exc}")
 
     def _bind(self, spec, action, hotkey_id, label):
+        """Start claiming a combo. Returns at once - RegisterHotKey happens on
+        the listener's own thread, and report_hotkeys() collects the outcome."""
         if not spec:
             return None
-        listener = HotkeyListener(spec, action, hotkey_id)
+        listener = HotkeyListener(spec, action, hotkey_id, hold=self._hold)
+        listener.label = label
         listener.start()
-        listener.ok.wait(5)
-        if listener.error:
-            log(listener.error)
-            self.tray.startup_warning = listener.error
-        else:
-            log(f"hotkey ({label}): {spec}")
         return listener
+
+    def report_hotkeys(self):
+        """Say how registration actually went, once the claims have settled."""
+        for listener in (self.hotkey, self.alt_hotkey, self.open_hotkey):
+            if listener is None:
+                continue
+            listener.ok.wait(5)
+            if listener.error:
+                log(listener.error)
+                self.tray.startup_warning = listener.error
+            else:
+                log(f"hotkey ({listener.label}): {listener.spec}")
+        # Only raise the banner when there is no way left to nab at all. A
+        # primary that lost its combo is just a nuisance while the backup still
+        # fires, and a red banner on every sign-in would be noise. Losing the
+        # lot is worth shouting about though: a tray tooltip is far too quiet a
+        # place to say the app will do nothing at the only moment it matters.
+        # Fixed wording - the banner does not wrap.
+        nab = [l for l in (self.hotkey, self.alt_hotkey) if l is not None]
+        if nab and not any(l.registered for l in nab):
+            self.show_banner("Hotkey Already Taken",
+                             "Set another in Settings", ok=False)
 
     def start_hotkey(self):
         self.hotkey = self._bind(self.cfg["hotkey"], self.save_clip, 1, "nab")
+        # Not if it is the same combo. Two listeners cannot both hold one key,
+        # so the second would fail, retry for ever, and report the key as
+        # "in use by another app" - the other app being Nab'd. Easy to walk
+        # into, because the backup is exactly the key someone rebinds TO once
+        # they find it is the one that works.
+        alt = self.cfg.get("hotkey_alt")
+        if alt and alt == self.cfg["hotkey"]:
+            log(f"backup hotkey {alt!r} is the same as the nab key; skipping")
+            alt = None
+        self.alt_hotkey = self._bind(alt, self.save_clip, 3, "nab (backup)")
         self.open_hotkey = self._bind(self.cfg.get("open_hotkey"),
                                       self.open_settings, 2, "open Nab'd")
 
+    def ensure_settings_helper(self):
+        """Keep a warm settings process alive.
+
+        Same reasoning as the banner: tkinter cannot share a main thread with
+        the tray icon. Starting one per open cost a second and a half before
+        anything moved - interpreter startup, then ~340 widgets - so the panel
+        stays resident and hidden, and a trigger file wakes it.
+        """
+        if self._settings and self._settings.poll() is None:
+            return
+        try:
+            self._settings = subprocess.Popen(
+                helper_command("settings", "--daemon"),
+                cwd=str(ASSET_DIR), creationflags=CREATE_NO_WINDOW)
+            if self._job:
+                ctypes.windll.kernel32.AssignProcessToJobObject(
+                    self._job, int(self._settings._handle))
+        except OSError as exc:
+            log(f"settings helper failed to start: {exc}")
+            self._settings = None
+
     def open_settings(self):
-        self.tray.open_settings()
+        """Wake the resident panel. Falls back to a one-shot process if the
+        helper is not up, so the tray never has a dead menu item."""
+        self.ensure_settings_helper()
+        if self._settings and self._settings.poll() is None:
+            ctypes.windll.user32.AllowSetForegroundWindow(self._settings.pid)
+            try:
+                SETTINGS_TRIGGER.write_text(str(time.time()),
+                                            encoding="utf-8")
+                return
+            except OSError as exc:
+                log(f"settings trigger failed: {exc}")
+        try:
+            proc = subprocess.Popen(helper_command("settings"),
+                                    cwd=str(ASSET_DIR))
+            # Hand our foreground rights to the panel. Without this Windows
+            # refuses to let it come to the front, and it cannot tell that the
+            # user has clicked away.
+            ctypes.windll.user32.AllowSetForegroundWindow(proc.pid)
+        except OSError as exc:
+            log(f"could not open settings: {exc}")
+
 
     def poll_config(self):
         """Apply settings written by the UI (or by hand) without a restart."""
@@ -1694,34 +2242,50 @@ class App:
 
         if changed & CAPTURE_KEYS and self.recorder.running:
             self.recorder.restart()
-        if changed & {"hotkey", "open_hotkey"}:
-            for listener in (self.hotkey, self.open_hotkey):
+        if changed & {"hotkey", "hotkey_alt", "open_hotkey"}:
+            for listener in (self.hotkey, self.alt_hotkey, self.open_hotkey):
                 if listener:
                     listener.shutdown()
             self.start_hotkey()
+            self.report_hotkeys()
         self.tray.refresh()
 
     def _capture_trouble(self, reason="lost"):
         if reason == "frozen":
-            self.show_banner("Capture is frozen - switch to Borderless Windowed",
+            self.show_banner("Capture Frozen", "Use Borderless Windowed",
                              ok=False)
         else:
-            self.show_banner("Capture lost the display - use Borderless Windowed",
+            self.show_banner("Capture Lost", "Use Borderless Windowed",
                              ok=False)
 
     def run(self):
-        # Recording comes first: a hotkey problem must never cost you the
-        # buffer, and the tray menu can still save clips without one.
+        # Claim the hotkeys first. RegisterHotKey is first-come-first-served
+        # with no way to outrank an earlier claimant, and a fresh logon is a
+        # scramble - overlays and rival clip recorders all want these same
+        # keys. Probing the encoder before asking handed them a full second's
+        # head start. This is safe to put ahead of the recorder only because
+        # it no longer blocks: registration runs on each listener's thread and
+        # report_hotkeys() picks the result up below, so a hotkey problem
+        # still cannot cost you the buffer.
+        self.start_hotkey()
         self.recorder.on_trouble = self._capture_trouble
         self.recorder.clear_buffer()
         self.recorder.start()
         self.ensure_banner_helper()  # warm, so the first clip confirms instantly
-        self.start_hotkey()
+        self.ensure_settings_helper()   # and so the first open is not a wait
+        self.report_hotkeys()
+        # A stale note from a panel that died mid-capture would otherwise keep
+        # the keys off; clear it before anything is bound to it.
+        try:
+            HOTKEY_HOLD.unlink()
+        except OSError:
+            pass
+        threading.Thread(target=self._watch_hotkey_hold, daemon=True).start()
         try:
             self.tray.run()
         finally:
             log("shutting down")
-            for listener in (self.hotkey, self.open_hotkey):
+            for listener in (self.hotkey, self.alt_hotkey, self.open_hotkey):
                 if listener:
                     listener.shutdown()
             self.recorder.stop()

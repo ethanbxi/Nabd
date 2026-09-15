@@ -4,14 +4,14 @@ A minimal instant-replay buffer for Windows. It continuously records your
 screen in the background; pressing a hotkey writes the last few minutes to an
 mp4. That's the whole feature set.
 
-**Press `Insert` to save a nab.** A banner slides in from the right to
-confirm: *"Nab'd Last 5 Minutes"*.
+**Press `Alt + Insert` to save a nab.** A banner confirms it in the bottom-right
+corner: *Nabbed — 5:00 · 1.2 GB*.
 
 ---
 
 ## Install
 
-Run **`NabdSetup-1.0.0.exe`** and click through the wizard.
+Run **`NabdSetup-2.0.0.exe`** and click through the wizard.
 
 Nothing else is needed — no Python, no ffmpeg, no fonts, no account. It is a
 per-user install, so there is **no admin prompt**, and everything lands in
@@ -88,7 +88,7 @@ raises the panel you already have rather than stacking copies.
 ```
 Recording - 5 min buffered        (status)
 -----------------------------------
-Save last 5 min  (Insert)
+Save last 5 min  (Alt + Insert)
 [x] Recording                     <- turn capture on or off
 -----------------------------------
 Open nabs folder
@@ -100,14 +100,36 @@ Quit
 
 **`Ctrl+Alt+N` opens the panel** without going near the tray.
 
+The panel is a 640px drawer with one repeated grammar: a label on the left, a
+fixed 344px control column on the right, and anything secondary — a disk meter,
+a volume slider, helper text — stacked *inside* that column so it stays attached
+to its control and every control lines up down the page.
+
 | Section | What you can change |
 |---|---|
-| **Recent nabs** | The newest nabs as thumbnails — click one to play it, arrows to page back through them — and a button to open the nabs folder |
-| **Nabs** | Folder nabs are saved to |
-| **Nab length** | 1, 3 or 5 minutes, with a live size estimate, and whether to start a fresh buffer after each nab |
-| **Hotkeys** | Save a nab, and open this panel. Click a field, press the combo; it tells you if it's already taken |
+| **Buffer card** | Live status, how much the buffer holds and how much disk is free, the retained window as a timeline, and the save hotkey shown large |
+| **Recent nabs** | The newest nabs as poster thumbnails — click one to play it, arrows to page back — and a button to open the nabs folder |
+| **Capture** | Nab length (1/3/5 min) with a live size estimate and disk meter, whether to start a fresh buffer after each nab, and the nabs folder |
 | **Video** | Which monitor (**Identify** outlines it in purple), quality, frame rate |
-| **Audio** | Which speakers to record, which microphone, a volume slider for each, and A/V sync |
+| **Audio** | Which speakers to record, which microphone, a volume slider for each, A/V sync and a **Test** button that saves a five-second nab |
+| **Hotkeys** | Save a nab, and open this panel. Click a field, press the combo; it tells you if it's already taken |
+
+Three things the panel works out rather than states:
+
+- **The size estimate is measured, not guessed.** The ring buffer is sitting on
+  disk in 2-second segments written by the encoder that actually won the probe,
+  so the byte rate is one `stat` away and tracks scene complexity live. Only
+  when the buffer is cold — or stale, because the recorder is stopped — does it
+  fall back to a bits-per-pixel model.
+- **The frame-rate list comes from the display.** You cannot capture more
+  distinct frames than the monitor presents, and a rate that is not an even
+  division paces unevenly, so the list is derived from the refresh rate and a
+  non-divisor is flagged rather than blocked.
+- **Disk pressure is guarded.** Past 60% of free space the meter goes amber;
+  past 85% it goes red, explains the numbers, and blocks Save on that field.
+
+Save stays disabled until something actually changes, and the discard button
+reads **Close** when there is nothing to lose and **Cancel** when there is.
 
 Saving applies within a couple of seconds — **no restart**. The running app
 watches `config.json`, rebuilds the capture pipeline, and rebinds the hotkey in
@@ -125,6 +147,7 @@ A few things are only in `config.json`, not the window:
 | `banner_delay` | `0.2` | Beat between the keypress and the banner sliding in. Set to `0` for instant. |
 | `preset` | `p5` | NVENC preset. `p4`/`p3` cost less GPU time if capture struggles under load |
 | `encoder` | `auto` | Force one of `h264_nvenc`, `h264_amf`, `h264_qsv`, `libx264` instead of probing |
+| `hotkey_alt` | `""` | A second combo that also saves a nab. `RegisterHotKey` is first-come-first-served, so a key another app claimed first can never be taken from it - set the key you actually want as `hotkey` and a free one here, and Nab'd keeps asking for the first in the background while the second works. |
 | `draw_mouse` | `true` | Include the cursor |
 
 `audio_offset_ms` starts at `-150`, measured against a flash/tone reference.
@@ -194,13 +217,23 @@ behaviour anti-cheat systems flag. Nab'd deliberately does not do this.
 - **Nab length rounds to 2s.** Segments are the unit of assembly, so a nab is
   ~300s ± 2s rather than exactly 300.
 - **The banner confirms right away; the nab finishes a moment later.** The
-  helper that draws it stays resident and watches a trigger file, so it responds
-  in ~50ms, then waits `banner_delay` before moving — landing on the same frame
-  as the keypress reads as a glitch rather than a response. It slides in while
-  the mark traces itself on, the text settles, and the underline sweeps out
-  and then drains as a countdown; when it empties, the mark retraces away and
-  the banner leaves. About 4.5 seconds end to end. Assembly continues in the
-  background; if the save fails, a red banner corrects it.
+  helper that draws it stays resident and watches a trigger file, so trigger to
+  first pixel is 5-7ms once its frames are loaded.
+
+  The motion is 4,120ms in eight beats: a 4px line slides out of the corner,
+  holds, the card stands up out of it, the mark draws itself on and the copy
+  fades up, the dismiss rule drains for 2.6s, then the mark winds back, the card
+  collapses onto the line, holds, and the line withdraws into the corner. Three
+  things carry it and all three are easy to undo by accident — **one axis at a
+  time** (horizontal and vertical never move in the same millisecond, or the two
+  read as a diagonal), **the 60ms and 70ms holds** that separate the beats, and
+  **asymmetric easing**: the collapse decelerates because it comes to rest on the
+  line, and only the final slide accelerates, because it actually leaves.
+
+  The size is not known when the banner opens - assembly is still running - so
+  it appears with the nab length and the figure is filled in afterwards, in
+  place, without restarting the timeline. If the save fails, a red banner
+  corrects it.
 - **A nab covers slightly past the keypress.** By design — see `save_delay`.
   Encoding runs with no B-frames and no lookahead so footage reaches disk
   promptly, and ffmpeg runs at above-normal priority so a busy game cannot
@@ -232,7 +265,7 @@ python build.py
 ```
 
 Three stages — gather the payload, freeze, package — ending at
-`dist\NabdSetup-1.0.0.exe` (~70 MB).
+`dist\NabdSetup-2.0.0.exe` (~70 MB).
 
 Needs on the build machine:
 
@@ -270,9 +303,16 @@ does not.
 |---|---|
 | `nabd.py` | The application, and the frozen entry point for all three modes |
 | `settings.py` | Settings window (own process — tkinter can't share the tray's thread) |
-| `banner.py` | The slide-out confirmation banner |
+| `banner.py` | The confirmation banner: window, assets and drawing |
+| `nabd_banner.py` | Its motion, as data. `sample(ms)` -> every animated value |
+| `nabd_ease.py` | CSS-identical cubic-bezier easing, because Tk has none |
+| `nabd_banner_frames.py` | Build-time frame generation, with the assertion that frame 16 is the mark |
+| `make_banner_assets.py` | Runs the above for both field colours |
+| `assets/banner/` | 432 pre-rendered frames: 4 DPI scales x 2 fields |
 | `brand.py` | Palette, type scale, and the logo drawn from its published geometry |
-| `theme.py` | Widgets built on the brand palette and type scale |
+| `nabd_tokens.py` | Every colour and metric in the panel, with DPI scaling |
+| `nabd_paint.py` | Pillow renderers for what Tk cannot draw — rounded rects, gradients, the toggle, the meter |
+| `nabd_ui.py` | The panel's widget set, built on those two |
 | `brand/` | The supplied logo assets, and the PNGs rendered from them |
 | `build.py` | Gather → freeze → package |
 | `nabd.spec` | PyInstaller spec |
@@ -306,8 +346,9 @@ The interface follows the Nabd visual identity. Three rules shaped the code:
   Two things are still built from the published measurements: the **app tile**
   (its SVG nests an inner `<svg>` with its own viewBox, which the rasteriser
   mis-places — the ring came out off-centre with a 7% stroke) and the
-  **animated mark** in the banner, since a partial stroke cannot come from a
-  bitmap. Both are checked against the spec: ring extent 47.5% of the tile,
+  **animated mark** in the banner, whose 17 sweep frames are generated at build
+  time from the same 295 degree geometry and asserted against it - at the last
+  frame the sweep *is* the mark, gap open at 1 o'clock, or the build fails. Both are checked against the spec: ring extent 47.5% of the tile,
   stroke 8.0%, optically centred.
 - **The mark is one stroke, and it never rotates.** The artwork ships as two
   paths, but the second ends exactly where the first begins, so it is a single
@@ -334,7 +375,7 @@ is what survives at small sizes.)
 
 | Check | Result |
 |---|---|
-| End-to-end nab via real `Insert` | Pass — 2560×1440, 59.3 fps, AAC 48kHz stereo |
+| End-to-end nab via real `Alt + Insert` | Pass — 2560×1440, 59.3 fps, AAC 48kHz stereo |
 | Banner appears on save | Pass |
 | Rebinding the hotkey while running | Pass — old combo released, new one live, no restart |
 | Config hot-reload | Pass — applied in ~2s |

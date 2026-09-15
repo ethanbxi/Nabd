@@ -1,26 +1,36 @@
-"""
-Slide-out confirmation banner for Nab'd.
+"""Save-banner for Nab'd, built to BANNER-MOTION.md.
 
 Normally runs as a warm daemon:  pythonw banner.py --daemon
 It keeps a hidden Tk root alive and watches a trigger file, so a banner appears
-within a frame or two of the hotkey instead of paying ~1s of interpreter and
-tkinter startup on every clip.
+within a frame or two of the hotkey instead of paying interpreter and tkinter
+startup on every nab.
 
 One-shot mode still works for testing:
-    pythonw banner.py "<text>" [ok|fail] [monitor]
+    pythonw banner.py "<title>" "<detail>" [ok|fail] [monitor]
+
+The motion is not defined here. `nabd_banner.sample(elapsed_ms)` returns every
+animated value for an instant and this module only draws it, sampled against a
+real clock. That indirection is the point: a dropped frame skips a value rather
+than desynchronising the phases, which matters because the one machine this
+ever runs on is busy running a game.
 """
 
 import ctypes
 import json
+import os
 import sys
 import time
 import tkinter as tk
 from ctypes import wintypes
 from pathlib import Path
 
+from PIL import Image, ImageTk
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import brand  # noqa: E402
 import nabd  # noqa: E402
+import nabd_banner as M  # noqa: E402
+import nabd_sound  # noqa: E402
+import nabd_tokens as T  # noqa: E402
 
 # Take the trigger path from nabd rather than deriving it here. Frozen, this
 # module lives inside the bundle, so __file__ points into _internal while the
@@ -28,111 +38,82 @@ import nabd  # noqa: E402
 # daemon watching a file nobody ever touches.
 TRIGGER = nabd.BANNER_TRIGGER
 
-WIDTH, HEIGHT = 372, 66
+KEY = "#010203"            # chroma key, so the rounded corners are cut out
+CREAM = "#F3EFE9"          # title
+DETAIL_FG = "#E3D8F5"      # figures
+RULE = "#F3EFE9"           # dismiss rule, drawn at 75% over the field
+RULE_ALPHA = 0.75
+FIELD = {"ok": T.PURPLE, "fail": T.DANGER}
+FIELD_LINE = {"ok": T.PURPLE_LIGHT, "fail": "#D2665C"}
+
+# Layout inside the 308x76 card, CSS px. The ring and the two text lines share
+# a centre line; the rule sits on the bottom edge.
+PAD_X, RING, GAP = 20, 30, 16
+RING_CY, TITLE_CY, DETAIL_CY = 37, 28, 48
+RULE_H = 3
+COPY_RISE = 6              # px the mark and copy travel as they fade up
+
+# Where the banner sits. BANNER-MOTION.md assumes bottom-right and says so:
+# "the timings and easings below still hold - the geometry needs adjusting".
+# Nab'd has always put it top-right, and that is where people look for it.
+# The card is anchored by its BOTTOM edge so the motion still reads as the card
+# standing up out of the line, which is the whole point of the rise.
 MARGIN_RIGHT, MARGIN_TOP = 24, 64
-# HOLD_MS is how long the underline takes to drain, which is what sets the
-# banner's dwell. Frames land a little slower than nominal, so the felt time is
-# a shade longer than this.
-SLIDE_MS, HOLD_MS, STEPS = 260, 1800, 22
-DELAY_MS = 200  # beat between the keypress and the banner moving
+# Where the card sits at rest, fully open. A click on a nab that is still
+# assembling pins the timeline here until it lands.
+HOLD_MS = 3100
+WAITING_TEXT = "Finishing…"
+# A clicked banner waits for the nab to finish writing. Assembly is a 3s settle
+# plus a concat that ran 9-29s for a five minute nab, so the ordinary guard
+# (delay + TOTAL_MS + 1500 = 5.6s) killed the wait before any real nab could
+# land: the click did nothing at all. Two minutes is past any plausible concat.
+WAIT_GUARD_MS = 120_000
 
-BG = brand.INK            # raised surface over the shell
-EDGE = "#2D2A35"
-TEXT = brand.CREAM
-ACCENT = {"ok": brand.PURPLE_LIGHT, "fail": "#E5484D"}
-RING = 30                 # the bare mark, drawing itself as the banner lands
-RING_X = 16               # left inset of the mark
-GUTTER = 16               # logo-to-content gap, mirrored on the right edge
-FRAME_MS = 16             # ~60fps for every animation step
+SCALES = (1.0, 1.25, 1.5, 2.0)
+FRAME_MS = 8               # sampling cadence; the clock decides the values
 
-# The mark and the underline both build over BUILD_MS, starting only once the
-# panel has finished sliding in. Sharing a start and a duration is what makes
-# them land on the same beat.
-BUILD_MS = 560
-UNDRAW_MS = 340           # retracing the mark away before the banner leaves
-TEXT_MS = 260             # the text easing into place behind it
-SHEEN_MS = 460            # the shimmer that acknowledges the build finishing
-SHEEN_HALF = 30           # half-width of the gloss band
-SHEEN_SLICES = 14         # solid slices standing in for a gradient
-SHEEN_TINT = "#3A3348"    # the highlight it blends toward
-KEY = "#010203"  # chroma key for the rounded corners
+
+class _Timer:
+    """Windows' default timer granularity is 15.6ms, so after(8) fires at
+    roughly half the rate the banner asks for: measured 262 frames drawn
+    across the 4120ms timeline instead of 436, median gap 15.61ms against the
+    9.46ms the same run gets with the resolution raised. The panel already
+    does this around its own animations; the banner is a separate process and
+    was never given the same treatment.
+
+    Refcounted, because one banner can replace another mid-flight, and held
+    only while something is actually animating - it is system-wide and costs
+    power.
+    """
+
+    def __init__(self):
+        self.depth = 0
+
+    def begin(self):
+        if self.depth == 0:
+            try:
+                ctypes.windll.winmm.timeBeginPeriod(1)
+            except Exception:
+                pass
+        self.depth += 1
+
+    def end(self):
+        if self.depth == 0:
+            return
+        self.depth -= 1
+        if self.depth == 0:
+            try:
+                ctypes.windll.winmm.timeEndPeriod(1)
+            except Exception:
+                pass
+
+
+TIMER = _Timer()
 
 GWL_EXSTYLE = -20
 WS_EX_NOACTIVATE = 0x08000000
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_TOPMOST = 0x00000008
-
-
-class _MONITORINFO(ctypes.Structure):
-    _fields_ = [("cbSize", wintypes.DWORD),
-                ("rcMonitor", wintypes.RECT),
-                ("rcWork", wintypes.RECT),
-                ("dwFlags", wintypes.DWORD)]
-
-
-def monitor_rects():
-    """Work areas in the same order Nab'd numbers displays (primary first)."""
-    found = []
-
-    def cb(hmon, hdc, rect, lparam):
-        mi = _MONITORINFO()
-        mi.cbSize = ctypes.sizeof(_MONITORINFO)
-        if ctypes.windll.user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
-            w = mi.rcWork
-            found.append({"left": w.left, "top": w.top, "right": w.right,
-                          "bottom": w.bottom, "primary": bool(mi.dwFlags & 1)})
-        return 1
-
-    proto = ctypes.WINFUNCTYPE(ctypes.c_int, wintypes.HMONITOR, wintypes.HDC,
-                               ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
-    ctypes.windll.user32.EnumDisplayMonitors(None, None, proto(cb), 0)
-    found.sort(key=lambda m: (not m["primary"], m["left"]))
-    return found or [{"left": 0, "top": 0, "right": 1920, "bottom": 1080,
-                      "primary": True}]
-
-
-RING_STEPS = 26
-_ring_cache = {}
-
-
-def ring_frames(size, colour):
-    """Antialiased frames of the mark drawing itself.
-
-    The Tk canvas cannot antialias an arc, so the stroke is rendered by PIL
-    once per process and swapped as an image. Built lazily and cached: the
-    resident helper pays for it on the first banner only.
-    """
-    key = (size, colour)
-    if key in _ring_cache:
-        return _ring_cache[key]
-    try:
-        from PIL import ImageTk
-        frames = [ImageTk.PhotoImage(
-            brand.ring_image(size, colour, progress=i / RING_STEPS))
-            for i in range(RING_STEPS + 1)]
-    except Exception:
-        frames = None          # fall back to drawing on the canvas
-    _ring_cache[key] = frames
-    return frames
-
-
-def blend(base, tint, f):
-    """Mix two #rrggbb colours; the canvas cannot do alpha, so do it here."""
-    f = max(0.0, min(1.0, f))
-    a = [int(base[i:i + 2], 16) for i in (1, 3, 5)]
-    b = [int(tint[i:i + 2], 16) for i in (1, 3, 5)]
-    return "#%02x%02x%02x" % tuple(
-        round(x + (y - x) * f) for x, y in zip(a, b))
-
-
-def round_rect(canvas, x1, y1, x2, y2, r, **kw):
-    pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
-           x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
-    return canvas.create_polygon(pts, smooth=True, **kw)
-
-
-def ease_out(t):
-    return 1 - (1 - t) ** 3
 
 
 def set_dpi_aware():
@@ -145,65 +126,252 @@ def set_dpi_aware():
             pass
 
 
-class Banner:
-    """One slide-in/slide-out run. Replaces any banner already on screen."""
+def _rgb(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
 
-    def __init__(self, root, text, kind="ok", monitor=0, delay=DELAY_MS / 1000,
-                 on_close=None):
+
+def mix(a, b, t):
+    """Blend two #rrggbb colours. The canvas has no per-item alpha, so every
+    fade here is a colour computed against the field it sits on."""
+    t = max(0.0, min(1.0, t))
+    ca, cb = _rgb(a), _rgb(b)
+    return "#%02x%02x%02x" % tuple(
+        int(round(x + (y - x) * t)) for x, y in zip(ca, cb))
+
+
+def pick_scale(dpi):
+    want = dpi / 96.0
+    return min(SCALES, key=lambda s: abs(s - want))
+
+
+def asset_dir(scale, kind):
+    root = Path(nabd.ASSET_DIR) / "assets" / "banner"
+    name = f"{scale:g}x" if kind == "ok" else f"{scale:g}x-fail"
+    return root / name
+
+
+class Assets:
+    """The pre-rendered card and ring frames for one scale and field colour.
+
+    Generated at build time (nabd_banner_frames.py). Rendering rounded
+    rectangles in Pillow at launch would hand back exactly what onedir bought.
+    """
+
+    def __init__(self, scale, kind):
+        self.scale = scale
+        self.kind = kind
+        self.dir = asset_dir(scale, kind)
+        self.field = FIELD[kind]
+        self._rings = {}
+        self._cards = {}
+        self._photo = {}
+
+    def ring(self, index, opacity):
+        """Frame `index` of 16, faded toward the field it sits on."""
+        step = round(max(0.0, min(1.0, opacity)) * 8)
+        key = ("ring", index, step)
+        if key not in self._photo:
+            img = self._rings.get(index)
+            if img is None:
+                img = Image.open(self.dir / f"ring_{index:02d}.png").convert("RGB")
+                self._rings[index] = img
+            if step < 8:
+                flat = Image.new("RGB", img.size, _rgb(self.field))
+                img = Image.blend(flat, img, step / 8.0)
+            self._photo[key] = ImageTk.PhotoImage(img)
+        return self._photo[key]
+
+    def card(self, h, w):
+        """The card at the nearest even height, stretched to `w`.
+
+        Stretching only ever happens while the card is the 4px line - the
+        slides move w, the rise moves h, and never both - so the 2px corner
+        radius is all that is ever distorted.
+        """
+        even = max(4, min(76, int(round(h / 2.0)) * 2))
+        key = ("card", even, w)
+        if key not in self._photo:
+            src = self._cards.get(even)
+            if src is None:
+                src = Image.open(self.dir / f"card_h{even:02d}.png").convert("RGBA")
+                self._cards[even] = src
+            img = src if src.width == w else src.resize(
+                (max(1, w), src.height), Image.BILINEAR)
+            self._photo[key] = ImageTk.PhotoImage(self._cut(img))
+        return self._photo[key]
+
+    def rule(self, width, colour):
+        """The dismiss rule, masked to the card's own bottom edge.
+
+        Drawn as a plain rectangle it overran the 12px bottom-left radius and
+        sat outside the card. The mask is taken from the full-height card's
+        alpha, so the left end curves exactly as the card does; cropping to
+        `width` leaves the draining right end square, which is correct - that
+        edge is the drain, not the card.
+        """
+        w = max(1, int(width))
+        key = ("rule", w, colour)
+        if key not in self._photo:
+            base = self._rule_base(colour)
+            self._photo[key] = ImageTk.PhotoImage(
+                base.crop((0, 0, min(w, base.width), base.height)))
+        return self._photo[key]
+
+    def _rule_base(self, colour):
+        key = ("rulebase", colour)
+        if key not in self._cards:
+            card = self._cards.get(76)
+            if card is None:
+                card = Image.open(self.dir / "card_h76.png").convert("RGBA")
+                self._cards[76] = card
+            h = max(1, int(round(RULE_H * self.scale)))
+            strip = card.crop((0, card.height - h, card.width, card.height))
+            out = Image.new("RGB", strip.size, _rgb(KEY))
+            alpha = strip.getchannel("A").point(lambda v: 255 if v >= 128 else 0)
+            out.paste(Image.new("RGB", strip.size, _rgb(colour)), (0, 0), alpha)
+            self._cards[key] = out
+        return self._cards[key]
+
+    @staticmethod
+    def _cut(img):
+        """Flatten onto the chroma key with a hard alpha edge.
+
+        Tk has no per-pixel alpha window, so the corners are cut with a colour
+        key. Keeping the antialiased edge would leave every partly transparent
+        pixel blended toward near-black - a dark fringe around the radius on
+        whatever is behind. A hard edge is the honest trade.
+        """
+        out = Image.new("RGB", img.size, _rgb(KEY))
+        alpha = img.getchannel("A").point(lambda v: 255 if v >= 128 else 0)
+        out.paste(img.convert("RGB"), (0, 0), alpha)
+        return out
+
+
+class Banner:
+    """One 4,120 ms run. Replaces any banner already on screen."""
+
+    def __init__(self, root, title, detail="", kind="ok", monitor=0,
+                 delay=0.0, on_close=None, assets=None, path=None,
+                 ready=False, token="", sound=None):
         self.root = root
-        self.done = False
-        # Owned rather than monkeypatched: callbacks scheduled in here capture
-        # the bound method immediately, so a later reassignment would be
-        # invisible to the hard-stop timer and leave the caller hanging.
+        self.sound = sound
         self.on_close = on_close
-        self.accent = ACCENT.get(kind, ACCENT["ok"])
-        mons = monitor_rects()
-        mon = mons[monitor] if 0 <= monitor < len(mons) else mons[0]
+        self.done = False
+        self.token = token        # which nab this banner belongs to
+        self._timing = False      # holds the 1ms timer while it animates
+        self.path = path
+        self.ready = ready
+        self._waiting = False       # clicked, but the nab is still assembling
+        self.kind = kind if kind in FIELD else "ok"
+        self.field = FIELD[self.kind]
+        self.title = title
+        self.detail = detail
+
+        mon = self._monitor(monitor)
+        self.mx, self.my, self.mw, self.mh = mon
+        dpi = self._dpi_for(self.mx, self.my)
+        self.scale = pick_scale(dpi)
+        self.px = lambda v: int(round(v * self.scale))
+        self.assets = assets or Assets(self.scale, self.kind)
 
         self.win = win = tk.Toplevel(root)
+        win.withdraw()
         win.overrideredirect(True)
-        win.attributes("-topmost", True)
         win.configure(bg=KEY)
         try:
             win.attributes("-transparentcolor", KEY)
         except tk.TclError:
             pass
+        win.attributes("-topmost", True)
+        win.attributes("-alpha", 0.0)
 
-        self.canvas = canvas = tk.Canvas(win, width=WIDTH, height=HEIGHT, bg=KEY,
-                                         highlightthickness=0, bd=0)
-        canvas.pack()
-        round_rect(canvas, 1, 1, WIDTH - 1, HEIGHT - 1, 14, fill=BG, outline=EDGE)
+        self.canvas = tk.Canvas(win, bg=KEY, highlightthickness=0, bd=0,
+                                width=self.px(M.CARD_W),
+                                height=self.px(M.CARD_H))
+        self.canvas.pack()
+        # WS_EX_NOACTIVATE stops the banner taking focus; it does not stop it
+        # receiving clicks. Opening the nab is the one thing anyone would want
+        # to do with this, so it is worth the one binding.
+        self.canvas.bind("<Button-1>", self._click)
+        self._set_cursor()
 
-        # The bare ring, turning while the clip is written. Purple Light, not
-        # Nabd Purple: full-strength purple linework on this surface would sit
-        # at 2.7:1, under the contrast floor.
-        self.ring_x = RING_X
-        self.ring_y = (HEIGHT - RING) / 2
-        self.trace = 0.0
-        self.frames = ring_frames(RING, self.accent)
-        self.ring_item = canvas.create_image(
-            self.ring_x, self.ring_y, anchor="nw", tags="ring") \
-            if self.frames else None
-        self._paint_ring()
+        # Anchored to the BOTTOM edge, which is the one the motion pins. The
+        # asset is only baked at even heights (round(h/2)*2), so on an odd
+        # frame it is a pixel taller or shorter than the window; anchored at
+        # the top that pixel landed on the fixed bottom edge and the card
+        # wobbled for ~6 frames of every rise and collapse.
+        self.card_item = self.canvas.create_image(0, 0, anchor="sw")
+        self.ring_item = self.canvas.create_image(0, 0, anchor="nw", state="hidden")
+        self.title_item = self.canvas.create_text(
+            0, 0, anchor="w", text=title, fill=self.field,
+            font=(T.FONT_UI_MEDIUM, -self.px(15)))
+        self.detail_item = self.canvas.create_text(
+            0, 0, anchor="w", text=detail, fill=self.field,
+            font=(T.FONT_MONO, -self.px(12)))
+        self.rule_item = self.canvas.create_image(0, 0, anchor="nw",
+                                                  state="hidden")
 
-        # Outfit SemiBold at 17px - the heaviest weight in the guidelines'
-        # scale, so the message carries at a glance mid-game.
-        self.text_x = self.ring_x + RING + GUTTER
-        self.text_id = canvas.create_text(
-            self.text_x + 10, HEIGHT / 2 - 5, text=text, anchor="w",
-            fill=TEXT, font=(brand.weight_font(600), -17))
-        canvas.bind("<Button-1>", lambda _e: self.finish())
+        self.start = None
+        self._delay = max(0.0, float(delay))
+        # The sound has to LEAVE before the animation starts, because the
+        # output device does not make it audible for another LEAD_MS. Both are
+        # scheduled off this one construction, so the gap between them is the
+        # lead and nothing else.
+        #
+        # The banner does not move: the existing pre-roll absorbs the lead, so
+        # play lands at (delay - lead) and the picture still starts at delay.
+        # Only when the pre-roll is shorter than the lead does the picture wait
+        # - it is the one case where there is nowhere else to take it from.
+        lead = nabd_sound.LEAD_MS / 1000.0
+        # A device that has gone quiet charges to wake up, and it charges
+        # whichever sound is played first. Asked BEFORE priming, since priming
+        # is what stops it being cold.
+        warm_up = 0.0
+        if self.sound and self.sound != "off":
+            if nabd_sound.cold():
+                warm_up = nabd_sound.COLD_EXTRA_MS / 1000.0
+            nabd_sound.prime()
+        start_at = self._delay + warm_up
+        self.root.after(int(max(0.0, start_at - lead) * 1000),
+                        self._play_sound)
+        self.root.after(int(max(start_at, lead) * 1000), self._begin)
+        # Hard stop, in case a frame callback is ever lost: the banner must not
+        # be able to sit on screen forever.
+        self._guard = self.root.after(
+            int(start_at * 1000) + M.TOTAL_MS + 1500, self.finish)
 
-        self.y = mon["top"] + MARGIN_TOP
-        self.x_off = mon["right"]
-        self.x_on = mon["right"] - WIDTH - MARGIN_RIGHT
-        win.geometry(f"{WIDTH}x{HEIGHT}+{self.x_off}+{self.y}")
-        win.update_idletasks()
+    # -- placement ---------------------------------------------------------
 
-        # Never take focus - a banner stealing input mid-fight would be worse
-        # than no banner at all.
+    @staticmethod
+    def _monitor(index):
         try:
-            hwnd = ctypes.windll.user32.GetParent(win.winfo_id()) or win.winfo_id()
+            mons = nabd.list_monitors()
+            if 0 <= index < len(mons):
+                m = mons[index]
+                return m["x"], m["y"], m["width"], m["height"]
+        except Exception:
+            pass
+        u = ctypes.windll.user32
+        return 0, 0, u.GetSystemMetrics(0), u.GetSystemMetrics(1)
+
+    @staticmethod
+    def _dpi_for(x, y):
+        try:
+            pt = wintypes.POINT(x + 8, y + 8)
+            mon = ctypes.windll.user32.MonitorFromPoint(pt, 2)   # NEAREST
+            dx, dy = ctypes.c_uint(), ctypes.c_uint()
+            if ctypes.windll.shcore.GetDpiForMonitor(
+                    mon, 0, ctypes.byref(dx), ctypes.byref(dy)) == 0:
+                return dx.value
+        except Exception:
+            pass
+        return 96
+
+    def _no_activate(self):
+        try:
+            hwnd = (ctypes.windll.user32.GetParent(self.win.winfo_id())
+                    or self.win.winfo_id())
             style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
             ctypes.windll.user32.SetWindowLongW(
                 hwnd, GWL_EXSTYLE,
@@ -211,184 +379,202 @@ class Banner:
         except Exception:
             pass
 
-        # A beat before it moves. Appearing on the same frame as the keypress
-        # reads as a glitch rather than a response.
-        win.after(max(0, int(delay * 1000)), self._enter)
-        # Hard stop, so a stuck animation can never leave a banner on screen.
-        # Sized from the whole sequence plus slack: set too tight it fires
-        # first, truncating the exit instead of guarding it.
-        budget = (int(delay * 1000) + SLIDE_MS * 2 + BUILD_MS + SHEEN_MS
-                  + HOLD_MS + UNDRAW_MS + 2500)
-        win.after(budget, self.finish)
+    # -- run ---------------------------------------------------------------
 
-    def _paint_ring(self):
-        if self.frames:
-            step = max(0, min(RING_STEPS, round(self.trace * RING_STEPS)))
-            self.canvas.itemconfigure(self.ring_item, image=self.frames[step])
-            return
-        self.canvas.delete("ring")
-        brand.draw_mark(self.canvas, self.ring_x, self.ring_y, RING,
-                        self.accent, progress=self.trace, tags=("ring",))
-
-    def _animate(self, duration, step, done=None, ease=None):
-        """Run `step(t)` with t moving 0 -> 1 over `duration` ms."""
-        frames = max(1, duration // FRAME_MS)
-        ease = ease or ease_out
-
-        def tick(i=0):
-            if self.done:
-                return
-            try:
-                step(ease(i / frames))
-            except tk.TclError:
-                return
-            if i < frames:
-                self.win.after(FRAME_MS, tick, i + 1)
-            elif done:
-                done()
-
-        tick()
-
-    def _enter(self):
+    def _begin(self):
         if self.done:
             return
-        self._built = 0
-        self._slide(0, True, self._arrived)
+        self.win.deiconify()
+        self._no_activate()
+        TIMER.begin()
+        self._timing = True
+        self.start = time.perf_counter()
+        self._tick()
 
-    def _set_trace(self, t):
-        self.trace = t
-        self._paint_ring()
+    def _play_sound(self):
+        """LEAD_MS before the clock starts - see __init__.
 
-    def _arrived(self):
-        """Everything builds once the panel has landed, not during the slide.
-
-        The mark and the underline share a start and a duration, so they finish
-        on the same beat without any timing arithmetic.
+        The file is TOTAL_MS long with its own beats baked in, so once it is
+        away there is nothing left to schedule and nothing that can drift.
+        Returns at once and never raises.
         """
-        self._animate(BUILD_MS, self._set_trace, self._stage_done)
-        self._animate(BUILD_MS, self._draw_rule, self._stage_done)
-        self._animate(TEXT_MS, self._settle_text)
+        if self.done:
+            return                  # replaced or dismissed before it began
+        nabd_sound.play(self.sound)
 
-    def _stage_done(self):
-        """Both build animations have to land before the shimmer fires.
-
-        Counted rather than timed: frames drift, and triggering off whichever
-        was nominally longer would sometimes fire early.
-        """
-        self._built += 1
-        if self._built >= 2 and not self.done:
-            self._animate(SHEEN_MS, self._shimmer, self._start_drain,
-                          ease=lambda t: t)
-
-    def _shimmer(self, t):
-        """A soft band crossing the panel once the build completes.
-
-        Drawn as a handful of solid slices blended toward a highlight rather
-        than a stippled rectangle: the Tk canvas has no per-item alpha, and
-        stipple reads as a dotted block instead of a gloss.
-        """
-        self.canvas.delete("sheen")
-        if t >= 1.0:
-            return
-        # Kept inside the content area so square slices never overhang the
-        # panel's rounded corners.
-        left, right = self.ring_x - 6, WIDTH - GUTTER + 6
-        centre = left - SHEEN_HALF + (right - left + SHEEN_HALF * 2) * t
-
-        for i in range(SHEEN_SLICES):
-            a = centre - SHEEN_HALF + (SHEEN_HALF * 2) * i / SHEEN_SLICES
-            b = centre - SHEEN_HALF + (SHEEN_HALF * 2) * (i + 1) / SHEEN_SLICES
-            if b < left or a > right:
-                continue
-            # Bell across the band, so it has a soft head and tail.
-            strength = 1 - abs((i + 0.5) / SHEEN_SLICES - 0.5) * 2
-            self.canvas.create_rectangle(
-                max(a, left), 4, min(b, right), HEIGHT - 4,
-                fill=blend(BG, SHEEN_TINT, strength * 0.9), outline="",
-                tags="sheen")
-
-        # The panel's content rides above the gloss.
-        for tag in ("ring", "rule"):
-            self.canvas.tag_raise(tag)
-        self.canvas.tag_raise(self.text_id)
-
-    def _settle_text(self, t):
-        self.canvas.coords(self.text_id, self.text_x + 10 * (1 - t),
-                           HEIGHT / 2 - 5)
-
-    def _rule_span(self):
-        """Full width of the content area: it starts where the text starts and
-        ends a matching gutter in from the right edge."""
-        return self.text_x, WIDTH - GUTTER
-
-    def _draw_rule(self, t):
-        x0, x1 = self._rule_span()
-        self.canvas.delete("rule")
-        if t > 0.01:
-            self.canvas.create_line(x0, HEIGHT / 2 + 13,
-                                    x0 + (x1 - x0) * t, HEIGHT / 2 + 13,
-                                    fill=self.accent, width=2,
-                                    capstyle="round", tags="rule")
-
-    def _start_drain(self):
-        """The underline empties over the hold, so the bar is still moving
-        right up to the moment the banner leaves."""
-        # Linear: it is a clock, and easing would make the wait read as uneven.
-        self._animate(HOLD_MS, self._drain_rule, self._leave, ease=lambda t: t)
-
-    def _drain_rule(self, t):
-        x0, x1 = self._rule_span()
-        self.canvas.delete("rule")
-        left = x0 + (x1 - x0) * t
-        if x1 - left > 1:
-            self.canvas.create_line(left, HEIGHT / 2 + 13, x1, HEIGHT / 2 + 13,
-                                    fill=self.accent, width=2,
-                                    capstyle="round", tags="rule")
-
-    def _leave(self):
-        """Retrace the mark away, then go.
-
-        The stroke unwinds the way it arrived, so the banner closes on the same
-        gesture it opened with instead of just vanishing.
-        """
-        self._animate(UNDRAW_MS, lambda t: self._set_trace(1 - t),
-                      lambda: self._slide(0, False, self.finish),
-                      ease=lambda t: t * t)
-
-    def _slide(self, step, forward, then):
+    def _tick(self):
+        """Sampled off the wall clock, not a tick counter and not chained
+        callbacks - a slow frame skips a value instead of stretching a phase."""
         if self.done:
             return
-        t = step / STEPS
-        f = ease_out(t) if forward else ease_out(1 - t)
-        x = int(self.x_off + (self.x_on - self.x_off) * f)
+        t = (time.perf_counter() - self.start) * 1000.0
+        if self._waiting:
+            # Someone clicked while the nab was still being written. Pinned at
+            # rest until it lands, then the exit plays from there as normal.
+            # Clamped rather than frozen where it stood, so a click during the
+            # exit brings the card back up instead of leaving it half folded.
+            t = min(t, HOLD_MS)
+            self.start = time.perf_counter() - t / 1000.0
+        if t >= M.TOTAL_MS:
+            self.finish()
+            return
         try:
-            self.win.geometry(f"{WIDTH}x{HEIGHT}+{x}+{self.y}")
-            # Repaint synchronously. Moving the window invalidates it, and
-            # Windows erases with the system class brush - white - if Tk has
-            # not painted by the time the frame is composed.
-            self.win.update_idletasks()
+            self.draw(M.sample(t))
         except tk.TclError:
+            self.finish()
             return
-        if step < STEPS:
-            self.win.after(SLIDE_MS // STEPS, self._slide, step + 1, forward, then)
+        self.root.after(FRAME_MS, self._tick)
+
+    def draw(self, f):
+        px, canvas = self.px, self.canvas
+        w, h = max(1, px(f.w)), max(1, px(f.h))
+
+        self.win.attributes("-alpha", f.alpha)
+        # The slides move w and x, the rise and collapse move h and y, and the
+        # two never land in the same geometry() call. Together they would read
+        # as one diagonal expansion out of the corner.
+        x = self.mx + self.mw - px(MARGIN_RIGHT) - w
+        y = self.my + px(MARGIN_TOP) + px(M.CARD_H) - h
+        self.win.geometry(f"{w}x{h}+{x}+{y}")
+        canvas.configure(width=w, height=h)
+
+        canvas.itemconfigure(self.card_item, image=self.assets.card(f.h, w))
+        canvas.coords(self.card_item, 0, h)
+
+        if f.copy <= 0.001:
+            canvas.itemconfigure(self.ring_item, state="hidden")
+            canvas.itemconfigure(self.title_item, text="")
+            canvas.itemconfigure(self.detail_item, text="")
         else:
-            then()
+            rise = px(COPY_RISE) * (1.0 - f.copy)
+            index = int(round(f.ring * 16))
+            if index > 0:
+                canvas.itemconfigure(self.ring_item, state="normal",
+                                     image=self.assets.ring(index, f.copy))
+                canvas.coords(self.ring_item, px(PAD_X),
+                              px(RING_CY - RING / 2) + rise)
+            else:
+                canvas.itemconfigure(self.ring_item, state="hidden")
+            tx = px(PAD_X + RING + GAP)
+            canvas.itemconfigure(self.title_item, text=self.title,
+                                 fill=mix(self.field, CREAM, f.copy))
+            canvas.coords(self.title_item, tx, px(TITLE_CY) + rise)
+            canvas.itemconfigure(self.detail_item, text=self.detail,
+                                 fill=mix(self.field, DETAIL_FG, f.copy))
+            canvas.coords(self.detail_item, tx, px(DETAIL_CY) + rise)
+
+        # The rule fades in as the purple-light line baked into the short cards
+        # fades out, then drains. Quantised to 2px and 8 opacity steps so the
+        # cache stays small across the 2.6s drain.
+        shown = 1.0 - f.line
+        rule_w = int(w * f.drain) // 2 * 2
+        if rule_w <= 0 or f.h < M.CARD_H - 1:
+            canvas.itemconfigure(self.rule_item, state="hidden")
+        else:
+            colour = mix(self.field,
+                         mix(self.field, RULE, RULE_ALPHA),
+                         round(shown * 8) / 8.0)
+            canvas.itemconfigure(self.rule_item, state="normal",
+                                 image=self.assets.rule(rule_w, colour))
+            canvas.coords(self.rule_item, 0, h - px(RULE_H))
+
+    def _set_cursor(self):
+        try:
+            self.canvas.configure(cursor="hand2" if self.path else "")
+        except tk.TclError:
+            pass
+
+    def _click(self, _event=None):
+        """Open the nab - or wait for it, if it is still being assembled.
+
+        A five minute nab takes tens of seconds to concatenate, far longer
+        than this banner lives, so a click almost always lands while the file
+        is still open. Opening it then would hand a half written mp4 to the
+        player; holding instead costs nothing and does what was asked.
+        """
+        if not self.path or self.done:
+            return
+        if not self.ready:
+            if not self._waiting:
+                self._waiting = True
+                # The timeline pins at HOLD_MS from here, but the sound cannot
+                # be paused - it would play its exit while the card is still
+                # standing. Cut it instead. HOLD_MS falls inside the file's
+                # two and a half seconds of silence, so the cut is inaudible.
+                nabd_sound.stop()
+                self.set_detail(WAITING_TEXT)
+                # The hold outlives the timeline, so the hard stop has to move
+                # with it or it fires mid-wait and the click is lost.
+                try:
+                    self.root.after_cancel(self._guard)
+                except Exception:
+                    pass
+                self._guard = self.root.after(WAIT_GUARD_MS, self._expire)
+            return
+        self._open()
+
+    def _expire(self):
+        """Waited long enough. Give up rather than sit on screen forever."""
+        self._waiting = False
+        self.finish()
+
+    def _open(self):
+        try:
+            os.startfile(self.path)
+        except OSError:
+            pass
+        self.finish()
+
+    def set_path(self, path):
+        self.path = path
+        self._set_cursor()
+
+    def set_ready(self, ready=True):
+        """The nab is closed and safe to open."""
+        self.ready = bool(ready)
+        if self.ready and self._waiting:
+            self._open()
+
+    def set_detail(self, detail):
+        """Fill in a figure that was not known when the banner opened, without
+        restarting the timeline."""
+        self.detail = detail
+        try:
+            self.canvas.itemconfigure(self.detail_item, text=detail)
+        except tk.TclError:
+            pass
 
     def finish(self):
         if self.done:
             return
         self.done = True
-        # Unmap before teardown, so no half-destroyed frame is ever composed.
-        for step in ("withdraw", "destroy"):
-            try:
-                getattr(self.win, step)()
-            except tk.TclError:
-                pass
+        if self._timing:
+            self._timing = False
+            TIMER.end()
+        try:
+            self.root.after_cancel(self._guard)
+        except Exception:
+            pass
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
         if self.on_close:
             try:
                 self.on_close()
             except Exception:
                 pass
+
+
+# --------------------------------------------------------------------------
+# daemon
+# --------------------------------------------------------------------------
+
+def _stamp():
+    try:
+        return TRIGGER.stat().st_mtime_ns
+    except OSError:
+        return None
 
 
 def run_daemon():
@@ -405,7 +591,13 @@ def run_daemon():
             stamp = None
     except OSError:
         pass
-    state = {"stamp": stamp, "current": None}
+    state = {"stamp": stamp, "current": None, "assets": {}}
+
+    def assets_for(scale, kind):
+        key = (scale, kind)
+        if key not in state["assets"]:
+            state["assets"][key] = Assets(scale, kind)
+        return state["assets"][key]
 
     def poll():
         stamp = _stamp()
@@ -415,27 +607,60 @@ def run_daemon():
                 data = json.loads(TRIGGER.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 data = None
-            if data and data.get("text"):
-                if state["current"]:
-                    state["current"].finish()
-                state["current"] = Banner(
-                    root, data["text"], data.get("kind", "ok"),
-                    int(data.get("monitor", 0)),
-                    float(data.get("delay", DELAY_MS / 1000)))
+            if data:
+                _apply(data)
         root.after(40, poll)
+
+    def _apply(data):
+        # An update only fills in a figure on the banner already running; it
+        # must not restart the timeline underneath it.
+        if data.get("update"):
+            cur = state["current"]
+            # Only onto the banner these figures were measured from. Assembly
+            # takes tens of seconds and anything can raise a banner meanwhile;
+            # without the token a "Capture Lost" card inherited the nab's
+            # size, path and hand cursor and showed "5:00 - 1.2 GB".
+            #
+            # The token only protects a banner that is still on screen. Asking
+            # it first meant a finished banner from the last nab - which
+            # state["current"] holds for ever - matched nothing and threw the
+            # payload away, so from the second nab on nothing was raised at
+            # all.
+            if cur and not cur.done:
+                if cur.token != data.get("token", ""):
+                    return
+                if data.get("detail") and not cur._waiting:
+                    cur.set_detail(data["detail"])
+                if data.get("path"):
+                    cur.set_path(data["path"])
+                if data.get("ready"):
+                    cur.set_ready(True)
+                return
+            # No live banner to update. The figures follow the banner within
+            # milliseconds and the poll is 40ms, so both writes can land
+            # between two polls - an update that carries the whole payload
+            # raises it rather than the banner being lost entirely.
+            if not data.get("title") or data.get("ready"):
+                return          # a completion with nothing left to show
+        if not data.get("title"):
+            return
+        if state["current"]:
+            state["current"].finish()
+        kind = data.get("kind", "ok")
+        mon = int(data.get("monitor", 0))
+        scale = pick_scale(Banner._dpi_for(*Banner._monitor(mon)[:2]))
+        state["current"] = Banner(
+            root, data["title"], data.get("detail", ""), kind, mon,
+            float(data.get("delay", 0.0)),
+            assets=assets_for(scale, kind), path=data.get("path"),
+            ready=bool(data.get("ready")), token=data.get("token", ""),
+            sound=data.get("sound"))
 
     root.after(40, poll)
     root.mainloop()
 
 
-def _stamp():
-    try:
-        return TRIGGER.stat().st_mtime_ns
-    except OSError:
-        return None
-
-
-def run_once(text, kind, monitor):
+def run_once(title, detail, kind, monitor):
     set_dpi_aware()
     root = tk.Tk()
     root.withdraw()
@@ -446,7 +671,7 @@ def run_once(text, kind, monitor):
         except tk.TclError:
             pass
 
-    Banner(root, text, kind, monitor, on_close=quit_root)
+    Banner(root, title, detail, kind, monitor, on_close=quit_root)
     root.mainloop()
 
 
@@ -454,10 +679,12 @@ def main():
     if "--daemon" in sys.argv:
         run_daemon()
         return
-    text = sys.argv[1] if len(sys.argv) > 1 else "Nab'd!"
-    kind = sys.argv[2] if len(sys.argv) > 2 else "ok"
-    monitor = int(sys.argv[3]) if len(sys.argv) > 3 else 0
-    run_once(text, kind, monitor)
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    title = args[0] if args else "Nabbed"
+    detail = args[1] if len(args) > 1 else "5:00 · 1.2 GB"
+    kind = args[2] if len(args) > 2 else "ok"
+    monitor = int(args[3]) if len(args) > 3 else 0
+    run_once(title, detail, kind, monitor)
 
 
 if __name__ == "__main__":
