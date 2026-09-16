@@ -20,6 +20,7 @@ import ctypes
 import os
 import queue
 import sys
+import threading
 import time
 import tkinter as tk
 from pathlib import Path
@@ -72,6 +73,7 @@ class Window:
         self.root.withdraw()
         self.root.configure(bg=T.PANEL)
         W.configure(self.root, "nab'd")
+        self._set_icon()
         try:
             T.set_scale(ctypes.windll.user32.GetDpiForWindow(
                 self.root.winfo_id()))
@@ -91,6 +93,23 @@ class Window:
         self.root.deiconify()
         self._pump()
         self._watch()
+
+    def _set_icon(self):
+        """The title bar, Alt-Tab and the taskbar.
+
+        Nothing ever set one, so Tk showed its own feather. Rendered from the
+        same brand tile the tray icon uses rather than shipping an .ico:
+        icon.ico exists but is not in the bundle - it is Inno's setup icon and
+        the exe's resource, neither of which Tk can reach at runtime.
+        """
+        try:
+            from PIL import ImageTk
+            # Held on the instance: Tk keeps no reference and the image is
+            # collected out from under the window if this is a local.
+            self._icon = ImageTk.PhotoImage(brand.tile_image(64))
+            self.root.iconphoto(True, self._icon)
+        except Exception as exc:
+            nabd.log(f"could not set the window icon: {exc}")
 
     # -- shell -------------------------------------------------------------
 
@@ -333,10 +352,28 @@ class Window:
         r += 1
         self.panel._sep(card, r)
         r += 1
+        row = self.panel._row(card, "Automatic updates", r)
+        self.auto_update = U.Toggle(
+            row.line, bool(self.panel.cfg.get("auto_update", True)),
+            command=lambda v: self.panel._mark("auto_update", bool(v)))
+        self.auto_update.pack(side="right")
+        row.helper("Downloads new versions in the background and installs "
+                   "them the next time nab'd starts, so the buffer is never "
+                   "interrupted. Off means it never checks.")
+
+        r += 1
+        self.panel._sep(card, r)
+        r += 1
         row = self.panel._row(card, "Version", r)
-        tk.Label(row.line, text="%s \u00b7 up to date" % nabd.VERSION,
-                 bg=T.SURFACE, fg=T.TEXT_MUTED,
-                 font=T.font("mono")).pack(side="right")
+        self.update_btn = U.Button(row.line, "Check for updates",
+                                   self._check_updates, variant="ghost")
+        self.update_btn.pack(side="right")
+        tk.Label(row.line, text=nabd.VERSION, bg=T.SURFACE, fg=T.TEXT_MUTED,
+                 font=T.font("mono")).pack(side="right", padx=(0, T.px(9)))
+        # No claim about being current until something has actually looked.
+        self.version_note = row.helper("")
+        self._ready = None          # a staged installer, once one is found
+        self._show_staged()
 
         r += 1
         self.panel._sep(card, r)
@@ -363,6 +400,91 @@ class Window:
         else:
             self.autostart_note.set(
                 "Launches minimised to the tray so the buffer is always warm.")
+
+    def _show_staged(self):
+        """A build already downloaded is waiting for the next start; offer to
+        take it now rather than making somebody wonder when 'next' is."""
+        import nabd_update
+        self._ready = nabd_update.staged(nabd.DATA_DIR, nabd.VERSION)
+        if self._ready:
+            version = self._ready.stem.split("-")[-1]
+            self.version_note.set(
+                "%s is downloaded. It installs when nab'd next starts."
+                % version, T.PURPLE_LIGHT)
+            self.update_btn.set_text("Install and restart")
+
+    def _check_updates(self):
+        """Ask GitHub, on a thread, because you asked.
+
+        The background check does the same thing on a timer when automatic
+        updates are on; this is the same call without the wait.
+        """
+        if self._ready:
+            self._install_now()
+            return
+        self.version_note.set("Checking\u2026", T.TEXT_FAINT)
+        self.update_btn.set_enabled(False)
+        threading.Thread(target=self._check_worker, daemon=True).start()
+
+    def _check_worker(self):
+        import nabd_update
+        found = nabd_update.check(nabd.VERSION)
+        if not found:
+            self._version_says("Up to date, or could not reach GitHub.",
+                               T.TEXT_FAINT)
+            return
+        version, url, name = found
+        self._version_says("%s is available - downloading\u2026" % version,
+                           T.PURPLE_LIGHT)
+        path = nabd_update.stage(nabd.DATA_DIR, url, name, nabd.VERSION)
+        if path is None:
+            self._version_says("%s is available, but the download failed."
+                               % version, T.WARN, link=True)
+            return
+        self._version_says("%s is ready to install." % version,
+                           T.PURPLE_LIGHT, staged=path)
+
+    def _install_now(self):
+        """Hand off and go. The installer restarts nab'd afterwards."""
+        import nabd_update
+        self.version_note.set("Installing\u2026", T.PURPLE_LIGHT)
+        self.root.update_idletasks()
+        if not nabd_update.apply(self._ready):
+            self.version_note.set("Could not start the installer.", T.WARN)
+            return
+        # The app has to be out of the way before its own exe is replaced.
+        try:
+            nabd.QUIT_TRIGGER.write_text(str(time.time()), encoding="utf-8")
+        except OSError:
+            pass
+        self.close()
+
+    def _version_says(self, text, colour, detail="", link=False, staged=None):
+        """Back onto the Tk thread; a worker must not touch widgets."""
+        def apply():
+            try:
+                self.version_note.set(text, colour)
+                self.update_btn.set_enabled(True)
+                if staged is not None:
+                    self._ready = staged
+                    self.update_btn.set_text("Install and restart")
+                if link:
+                    self.version_note.configure(cursor="hand2")
+                    self.version_note.bind(
+                        "<Button-1>", lambda _e: self._releases())
+            except tk.TclError:
+                pass
+            if detail:
+                nabd.log(f"update check failed: {detail}")
+        try:
+            self.root.after(0, apply)
+        except tk.TclError:
+            pass
+
+    def _releases(self):
+        import webbrowser
+        import nabd_update
+        webbrowser.open(nabd_update.RELEASES)
 
     def _notices(self):
         self._open(nabd.ASSET_DIR / "THIRD-PARTY-NOTICES.md")

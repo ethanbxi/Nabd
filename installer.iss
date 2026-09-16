@@ -8,7 +8,7 @@
 
 #define AppName "Nab'd"
 #define AppShortName "Nabd"
-#define AppVersion "2.1.0"
+#define AppVersion "2.2.0"
 #define AppPublisher "Nab'd"
 #define AppExe "Nabd.exe"
 
@@ -106,6 +106,17 @@ Type: files; Name: "{userstartup}\{#AppName}.lnk"
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Start {#AppName} now"; \
     Flags: nowait postinstall skipifsilent
+; The updater runs setup silently, and the entry above is skipifsilent - so
+; without this an auto-update would leave the machine with no nab'd running
+; and no buffer. Only fires for /relaunch=1, which only the updater passes.
+Filename: "{app}\{#AppExe}"; Parameters: "--autostart"; \
+    Flags: nowait; Check: Relaunching
+
+[Code]
+function Relaunching: Boolean;
+begin
+  Result := ExpandConstant('{param:relaunch|0}') = '1';
+end;
 
 [UninstallDelete]
 ; The rolling buffer can be gigabytes; leaving it behind would be rude.

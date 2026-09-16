@@ -36,7 +36,7 @@ DISPLAY_NAME = "Nab'd"  # anything the user actually reads
 # Shown in the window's rail. installer.iss carries the same number for the
 # package, and build.py refuses to build if the two disagree - there is no way
 # for Inno to read this file, so the check is the link between them.
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 APP_DIR = Path(__file__).resolve().parent
 
 # Frozen, the code and the artwork live wherever the installer put them - which
@@ -229,6 +229,9 @@ DEFAULTS = {
     # Where the main window was last left. Empty means "use the default,
     # centred": additive with a safe default, so no config_version bump.
     "window_geometry": "",
+    # Check GitHub for a newer build, download it, and install it at the next
+    # launch. Off means no request is made at all.
+    "auto_update": True,
 }
 
 # What the capture pipeline is out by before anyone touches a slider, in ms.
@@ -2106,6 +2109,29 @@ class App:
             if listener is not None:
                 listener.sync()
 
+    def _watch_updates(self):
+        """Look once after things have settled, then a few times a day.
+
+        Downloads only; installing happens at the next launch. Nothing here
+        runs at all when auto_update is off - the setting gates the request,
+        not the result.
+        """
+        import nabd_update
+        time.sleep(90)                       # let the buffer get going first
+        while True:
+            try:
+                if self.cfg.get("auto_update", True):
+                    found = nabd_update.check(VERSION)
+                    if found and not nabd_update.staged(DATA_DIR, VERSION):
+                        version, url, name = found
+                        log(f"{version} is available; downloading")
+                        if nabd_update.stage(DATA_DIR, url, name, VERSION):
+                            log(f"{version} staged; it installs at the next "
+                                f"start")
+            except Exception as exc:
+                log(f"update check failed: {exc}")
+            time.sleep(6 * 3600)
+
     def poll_quit(self):
         """The main window asking the app to stop. Same end as the tray's
         Quit; the window cannot call it directly from another process."""
@@ -2332,6 +2358,7 @@ class App:
             except OSError:
                 pass
         threading.Thread(target=self._watch_hotkey_hold, daemon=True).start()
+        threading.Thread(target=self._watch_updates, daemon=True).start()
         try:
             self.tray.run()
         finally:
@@ -2454,6 +2481,18 @@ def main():
         return 0
 
     cfg = load_config()
+    # Before anything starts recording. Applying an update here costs nothing -
+    # there is no buffer yet to interrupt - which is the whole reason a
+    # download waits for a launch instead of installing when it lands.
+    if cfg.get("auto_update", True) and "--no-update" not in sys.argv:
+        try:
+            import nabd_update
+            ready = nabd_update.staged(DATA_DIR, VERSION)
+            if ready and nabd_update.apply(ready):
+                log(f"installing {ready.name} and restarting")
+                return 0
+        except Exception as exc:
+            log(f"update could not be applied: {exc}")
     try:
         ffmpeg = find_ffmpeg()
     except RuntimeError as exc:
