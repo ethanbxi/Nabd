@@ -334,8 +334,17 @@ def cover(im, w, h):
 
 class Panel:
 
-    def __init__(self, daemon=False):
+    def __init__(self, daemon=False, embed=None):
+        """`embed` is a widget to build into instead of a window of our own.
+
+        The drawer owns its Tk root, its chrome and its scroll canvas; the main
+        window owns all three itself and only wants the groups. Everything
+        between those two points - config, dirty tracking, device enumeration,
+        the row and group grammar - is the same either way and is set up below
+        regardless.
+        """
         self.daemon = daemon
+        self.embedded = embed is not None
         self.cfg = nabd.load_config()
         self.start = dict(self.cfg)
         try:
@@ -343,20 +352,28 @@ class Panel:
         except RuntimeError:
             self.ffmpeg = None
 
-        self.root = tk.Tk()
-        self.root.title(f"{nabd.DISPLAY_NAME} Settings")
-        T.set_scale(ctypes.windll.user32.GetDpiForWindow(self.root.winfo_id()))
-        self.root.configure(bg=T.PANEL)
-        self.root.overrideredirect(True)
-        self.root.attributes("-topmost", True)
-        self._tool_window()
-        self.root.resizable(False, False)
-        self.root.bind("<Escape>", self._on_escape)
+        if self.embedded:
+            # Somebody else's window. It has already set the scale and owns the
+            # chrome, the close key and the dismissal - none of which mean
+            # anything to a panel that is not a drawer.
+            self.root = embed.winfo_toplevel()
+        else:
+            self.root = tk.Tk()
+            self.root.title(f"{nabd.DISPLAY_NAME} Settings")
+            T.set_scale(
+                ctypes.windll.user32.GetDpiForWindow(self.root.winfo_id()))
+            self.root.configure(bg=T.PANEL)
+            self.root.overrideredirect(True)
+            self.root.attributes("-topmost", True)
+            self._tool_window()
+            self.root.resizable(False, False)
+            self.root.bind("<Escape>", self._on_escape)
         # Focus leaving the panel is the event the dismiss is really waiting
         # for; the 100ms pump is only a backstop for focus changes Tk never
         # sees. _check_dismiss still decides - it fires for internal focus
         # moves too, and those belong to this process.
-        self.root.bind("<FocusOut>", self._focus_left)
+        if not self.embedded:
+            self.root.bind("<FocusOut>", self._focus_left)
 
         self._results = queue.Queue()
         self._pump_id = None
@@ -410,13 +427,22 @@ class Panel:
         self.groups = []        # eyebrow + card + rows, for search
         self._group = None
         # Geometry up front, so the still can be cut before the first open.
-        rect = screen_rect()
-        self._w, self._h = T.px(T.PANEL_W), rect.bottom - rect.top
-        self._y, self._dock_x = rect.top, rect.left
+        # An embedded panel has none: its size is whatever its host gives it.
+        rect = screen_rect() if not self.embedded else None
+        if rect is not None:
+            self._w, self._h = T.px(T.PANEL_W), rect.bottom - rect.top
+            self._y, self._dock_x = rect.top, rect.left
+        else:
+            self._w = T.px(T.PANEL_W)
+            self._h = self._y = self._dock_x = 0
         self._overlay = None
         self._avtest = None     # the A/V sync card, while it is running
         self._click = None      # the click, rendered once and kept
 
+        if self.embedded:
+            # The host builds the groups it wants, into the panes it wants,
+            # and then calls the same settle-up steps below itself.
+            return
         self.root.withdraw()
         self._build()
         self._refresh_disk()
@@ -451,6 +477,17 @@ class Panel:
         eye.pack(fill="x", pady=(T.px(T.GROUP_GAP), T.px(10)))
         card = U.card(parent)
         card.pack(fill="x")
+        # The 344px control column is what makes every card identical, and it
+        # was only ever 344 because each group happened to contain a control
+        # that asked for exactly that. A group whose widest control is narrower
+        # - the window's App group, say - quietly got a narrower column and its
+        # rows stopped lining up with everything else. A floor makes the
+        # invariant real; anything that genuinely needs more still grows.
+        # +ROW_PAD_X because the control's own grid cell carries that
+        # padding on its right, so a floor of just 344 is already met
+        # by a 329px control and changes nothing.
+        card.body.grid_columnconfigure(
+            1, minsize=T.px(T.CONTROL_COL) + T.px(T.ROW_PAD_X))
         self._group = {"title": title, "eyebrow": eye, "card": card,
                        "rows": [], "seps": [],
                        "eye_pack": {"fill": "x",
@@ -1821,6 +1858,10 @@ class Panel:
         self.start = dict(self.cfg)
         self.dirty.clear()
         self._refresh_footer()
+        if self.embedded:
+            # A drawer is a thing you dismiss; a window is a thing you leave
+            # open. Saving should not close it.
+            return
         # Held so a manual close can cancel it; otherwise this fires on a panel
         # that has already gone and animates the hidden window.
         self._dismiss_id = self.root.after(700, self.dismiss)
@@ -2821,7 +2862,12 @@ class Panel:
                 # to put it away. Launching the exe does not: it means "open
                 # the app", and closing the panel because it happened to be up
                 # looks like the app shutting itself down.
-                if _trigger_wants_show():
+                token = _trigger_token()
+                if token == nabd.WINDOW_SHOW:
+                    # Not the drawer at all. This process is the one that is
+                    # always resident, so it is the one that hears it.
+                    nabd.signal_window()
+                elif token == nabd.SETTINGS_SHOW:
                     if not self._shown:
                         self.toggle()
                 else:
@@ -2841,13 +2887,17 @@ def _stamp():
         return None
 
 
-def _trigger_wants_show():
-    """Did whoever wrote the trigger mean "open", rather than "toggle"?"""
+def _trigger_token():
+    """What whoever wrote the trigger actually asked for.
+
+    A timestamp means toggle - the hotkey and the tray, where the same press
+    puts it away. SETTINGS_SHOW means open the drawer and leave an open one
+    alone. WINDOW_SHOW is not ours at all; it means the main window.
+    """
     try:
-        return nabd.SETTINGS_TRIGGER.read_text(
-            encoding="utf-8").strip() == nabd.SETTINGS_SHOW
+        return nabd.SETTINGS_TRIGGER.read_text(encoding="utf-8").strip()
     except OSError:
-        return False
+        return ""
 
 
 DAEMON_MUTEX = "Nabd.SettingsDaemon"

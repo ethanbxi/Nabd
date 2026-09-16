@@ -1,10 +1,10 @@
 # PyInstaller spec for Nab'd.
 #
-# One binary in three roles: the tray app, the settings panel (--settings) and
-# the banner helper (--banner). Frozen there is no interpreter to hand a script
-# to, so the helpers are this same exe re-invoked with a flag - which is why
-# settings/banner/theme/brand are forced in as hidden imports even though
-# nothing imports them at module scope.
+# One binary in four roles: the tray app, the main window (--window), the
+# settings drawer (--settings) and the banner helper (--banner). Frozen there is
+# no interpreter to hand a script to, so the helpers are this same exe
+# re-invoked with a flag - which is why window/settings/banner/brand are forced
+# in as hidden imports even though nothing imports them at module scope.
 #
 # onedir, not onefile: onefile unpacks to a temp folder on every launch, and
 # the banner helper starts on every nab.
@@ -39,7 +39,7 @@ a = Analysis(
     binaries=[],
     datas=datas,
     hiddenimports=[
-        "settings", "banner", "brand",
+        "settings", "banner", "brand", "window", "nabd_window",
         "nabd_tokens", "nabd_paint", "nabd_ui",
         "nabd_banner", "nabd_ease", "nabd_panel_open",
         "pyaudiowpatch", "pystray._win32",

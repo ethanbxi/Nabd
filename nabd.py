@@ -33,6 +33,10 @@ except ImportError:  # pragma: no cover - only on 3.13+
 
 APP_NAME = "Nabd"       # internal: mutex, folders, filenames
 DISPLAY_NAME = "Nab'd"  # anything the user actually reads
+# Shown in the window's rail. installer.iss carries the same number for the
+# package, and build.py refuses to build if the two disagree - there is no way
+# for Inno to read this file, so the check is the link between them.
+VERSION = "2.1.0"
 APP_DIR = Path(__file__).resolve().parent
 
 # Frozen, the code and the artwork live wherever the installer put them - which
@@ -55,6 +59,16 @@ SETTINGS_TRIGGER = DATA_DIR / ".settings_trigger"
 # Written into the trigger to mean "open", as opposed to the timestamp the
 # hotkey and the tray write, which means "toggle".
 SETTINGS_SHOW = "show"
+# ...and this one is not the drawer at all: raise the main window. The resident
+# settings helper hears it, because it is the process that is always there.
+WINDOW_SHOW = "window"
+# The window's own handshake. A second copy must not open; it raises the one
+# that exists instead.
+WINDOW_TRIGGER = DATA_DIR / ".window_trigger"
+WINDOW_MUTEX = "Nabd.Window"
+# The window's Quit button. It is a separate process, so it asks rather than
+# acts - the tray's own Quit is the same call at the other end.
+QUIT_TRIGGER = DATA_DIR / ".quit_trigger"
 AV_TEST_TRIGGER = DATA_DIR / ".av_test"
 # The settings panel asks us to let go of the nab keys while it listens for a
 # new one. Holds a deadline, so a panel that dies mid-capture cannot leave the
@@ -212,6 +226,9 @@ DEFAULTS = {
     # built-in. nabd_sound.resolve() is the one place that decides.
     "capture_sound": "pip",
     "banner_delay": 0.2,  # beat before the confirmation slides in
+    # Where the main window was last left. Empty means "use the default,
+    # centred": additive with a safe default, so no config_version bump.
+    "window_geometry": "",
 }
 
 # What the capture pipeline is out by before anyone touches a slider, in ms.
@@ -538,10 +555,17 @@ def list_monitors():
         mi.cbSize = ctypes.sizeof(_MONITORINFOEXW)
         if ctypes.windll.user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
             r = mi.rcMonitor
+            wk = mi.rcWork
             found.append({"device": mi.szDevice,
                           "width": r.right - r.left,
                           "height": r.bottom - r.top,
                           "x": r.left, "y": r.top,
+                          # The work area - the screen minus the taskbar. Read
+                          # from the struct all along and discarded; the main
+                          # window needs it to restore a position that is not
+                          # underneath the shelf.
+                          "work": (wk.left, wk.top,
+                                   wk.right - wk.left, wk.bottom - wk.top),
                           "primary": bool(mi.dwFlags & 1)})
         return 1
 
@@ -1876,7 +1900,7 @@ class App:
         self._cfg_stamp = self._stamp()
         # Set by main(): everything except the sign-in launch should show a
         # window, or there is no way to tell the app started at all.
-        self.show_panel_on_start = False
+        self.show_window_on_start = False
 
     def _stamp(self):
         try:
@@ -2082,11 +2106,26 @@ class App:
             if listener is not None:
                 listener.sync()
 
+    def poll_quit(self):
+        """The main window asking the app to stop. Same end as the tray's
+        Quit; the window cannot call it directly from another process."""
+        try:
+            QUIT_TRIGGER.unlink()
+        except OSError:
+            return
+        log("quit requested from the window")
+        try:
+            self.tray.icon.visible = False
+            self.tray.icon.stop()
+        except Exception:
+            os._exit(0)
+
     def _watch_hotkey_hold(self):
         while True:
             time.sleep(0.15)
             try:
                 self.poll_hotkey_hold()
+                self.poll_quit()
             except Exception:
                 pass
 
@@ -2279,16 +2318,19 @@ class App:
         self.recorder.clear_buffer()
         self.recorder.start()
         self.ensure_banner_helper()  # warm, so the first clip confirms instantly
-        # ...and so the first open is not a wait. `show` asks it to present
-        # itself once built, which is what "opening the app" has to do.
-        self.ensure_settings_helper(show=self.show_panel_on_start)
+        self.ensure_settings_helper()   # and so the first open is not a wait
+        # Opening the app opens the WINDOW, not the drawer. The drawer is what
+        # the hotkey is for.
+        if self.show_window_on_start:
+            signal_window()
         self.report_hotkeys()
         # A stale note from a panel that died mid-capture would otherwise keep
         # the keys off; clear it before anything is bound to it.
-        try:
-            HOTKEY_HOLD.unlink()
-        except OSError:
-            pass
+        for stale in (HOTKEY_HOLD, QUIT_TRIGGER):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
         threading.Thread(target=self._watch_hotkey_hold, daemon=True).start()
         try:
             self.tray.run()
@@ -2317,8 +2359,39 @@ def claim_single_instance():
     return handle
 
 
-def wants_panel(argv, config_exists):
-    """Should this launch put the settings panel on screen?
+def window_running():
+    handle = ctypes.windll.kernel32.OpenMutexW(0x00100000, False, WINDOW_MUTEX)
+    if handle:
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+    return False
+
+
+def signal_window():
+    """Bring the main window up: raise the one that exists, or start one.
+
+    Called from whichever process notices - a fresh launch, or the resident
+    settings helper reading WINDOW_SHOW off the trigger - so it has to work
+    without knowing which of those it is.
+    """
+    if window_running():
+        try:
+            WINDOW_TRIGGER.write_text(str(time.time()), encoding="utf-8")
+            return True
+        except OSError as exc:
+            log(f"could not raise the window: {exc}")
+            return False
+    try:
+        subprocess.Popen(helper_command("window"), cwd=str(ASSET_DIR),
+                         creationflags=CREATE_NO_WINDOW)
+        return True
+    except OSError as exc:
+        log(f"window failed to start: {exc}")
+        return False
+
+
+def wants_window(argv, config_exists):
+    """Should this launch put the main window on screen?
 
     Four things start this exe and they are otherwise identical: the
     installer's "start now" box, the Start Menu and desktop icons, a double
@@ -2336,6 +2409,10 @@ def wants_panel(argv, config_exists):
     return not config_exists
 
 
+# The old name, from when the drawer was the only UI there was.
+wants_panel = wants_window
+
+
 def main():
     # One executable, three roles. Frozen there is no interpreter to hand a
     # script to, so the helpers are this same binary re-invoked with a flag.
@@ -2345,6 +2422,9 @@ def main():
     if "--banner" in sys.argv:
         import banner
         return banner.main() or 0
+    if "--window" in sys.argv:
+        import window
+        return window.main() or 0
 
     log(f"--- {DISPLAY_NAME} starting ---")
     # Windows starts us with --autostart at sign-in. Every other launch - the
@@ -2353,7 +2433,7 @@ def main():
     # window. A first run shows one either way: a silent install followed by a
     # reboot would otherwise never show the app at all.
     first_run = not CONFIG_PATH.exists()
-    show = wants_panel(sys.argv, not first_run)
+    show = wants_window(sys.argv, not first_run)
 
     if claim_single_instance() is None:
         # Already running. This used to answer with a message box telling you
@@ -2365,7 +2445,7 @@ def main():
         # belongs to the other instance.
         ctypes.windll.user32.AllowSetForegroundWindow(-1)
         try:
-            SETTINGS_TRIGGER.write_text(SETTINGS_SHOW, encoding="utf-8")
+            SETTINGS_TRIGGER.write_text(WINDOW_SHOW, encoding="utf-8")
         except OSError:
             ctypes.windll.user32.MessageBoxW(
                 None,
@@ -2381,9 +2461,9 @@ def main():
         return 1
 
     app = App(cfg, ffmpeg)
-    app.show_panel_on_start = show
+    app.show_window_on_start = show
     if show:
-        log("opening the settings panel (%s)"
+        log("opening the main window (%s)"
             % ("first run" if first_run else "launched by hand"))
     app.run()
     return 0

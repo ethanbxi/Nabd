@@ -48,3 +48,6 @@ __pycache__/
 
 # Poster cache for the recent-nabs strip (regenerated on demand).
 posters/
+
+# The handoff zips, unpacked into docs/ already.
+Claude outputs/

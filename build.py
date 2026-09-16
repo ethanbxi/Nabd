@@ -8,6 +8,7 @@ app with PyInstaller, then wrap the result with Inno Setup. The output is a
 single distributable .exe in dist/.
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -119,6 +120,22 @@ def gather():
             print(f"  sound       FAILED: {wav.name}: {exc}")
             return False
     print(f"  sound       {len(wavs)} verified at {nabd_sound.DURATION_MS}ms")
+
+    # installer.iss is the package version and nabd.VERSION is the one the
+    # window shows. Inno cannot read the Python, so nothing but this keeps the
+    # two from drifting - and a window reporting last release's number is the
+    # kind of wrong nobody notices for months.
+    import nabd as _n
+    iss = (APP / "installer.iss").read_text(encoding="utf-8")
+    m = re.search(r'#define\s+AppVersion\s+"([^"]+)"', iss)
+    if not m:
+        print("  version     FAILED: no AppVersion in installer.iss")
+        return False
+    if m.group(1) != _n.VERSION:
+        print(f"  version     FAILED: installer.iss says {m.group(1)}, "
+              f"nabd.VERSION says {_n.VERSION}")
+        return False
+    print(f"  version     {_n.VERSION}, matching installer.iss")
     return True
 
 
