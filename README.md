@@ -3,7 +3,7 @@
 <img src="docs/media/hero.png" alt="Nab'd — instant replay for Windows" width="100%">
 
 <p>
-  <a href="https://github.com/ethanbxi/Nabd/releases/latest"><img src="https://img.shields.io/badge/download-NabdSetup%202.1.0-6C3BAA?style=for-the-badge&labelColor=17161A" alt="Download"></a>
+  <a href="https://github.com/ethanbxi/Nabd/releases/latest"><img src="https://img.shields.io/github/v/release/ethanbxi/Nabd?label=download&color=6C3BAA&style=for-the-badge&labelColor=17161A" alt="Download"></a>
   <img src="https://img.shields.io/badge/windows-10%20%2F%2011-4E2A7D?style=for-the-badge&labelColor=17161A" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/no%20admin-per--user%20install-4E2A7D?style=for-the-badge&labelColor=17161A" alt="Per-user install">
   <img src="https://img.shields.io/badge/license-MIT-4E2A7D?style=for-the-badge&labelColor=17161A" alt="MIT">
@@ -32,7 +32,9 @@ in the corner: *Nabbed — 5:00 · 1.2 GB*.
 
 ## Install
 
-Run **`NabdSetup-2.1.0.exe`** and click through the wizard.
+Download the latest **`NabdSetup`** from
+[Releases](https://github.com/ethanbxi/Nabd/releases/latest) and click through
+the wizard.
 
 Nothing else is needed — no Python, no ffmpeg, no fonts, no account. It is a
 per-user install, so there is **no admin prompt**, and everything lands in
@@ -97,13 +99,16 @@ Two details that make it cheap:
 
 ## Settings
 
-**Click the tray icon** to open Settings. It slides in from the right and docks
-there as a full-height panel spanning the whole screen, taskbar included — no
-system title bar, just an ✕ in its corner. Escape closes it, and so does
-clicking on anything else: it slides back out on its own. Dropdowns and the
-folder picker do not count as clicking away. Right-clicking gives the full menu,
-and the *Nab'd Settings* Start Menu shortcut works as well. Opening it again
-raises the panel you already have rather than stacking copies.
+**Click the tray icon** to open the Nab'd window — the fuller of the two
+surfaces, and what the *Nab'd Settings* Start Menu shortcut opens too. Opening
+it again raises the window you already have rather than stacking copies.
+
+There is also a **drawer**: the same settings as a full-height panel that
+slides in from the right and docks over the whole screen, taskbar included —
+no system title bar, just an ✕ in its corner. Escape closes it, and so does
+clicking on anything else; it slides back out on its own, and dropdowns and the
+folder picker do not count as clicking away. That is the hotkey's surface,
+because it arrives over whatever is in front without making you leave it.
 
 <div align="center">
 
@@ -113,22 +118,29 @@ raises the panel you already have rather than stacking copies.
 
 </div>
 
-<!-- A real screenshot of the tray menu can go here as docs/media/tray.png. -->
+**Right-clicking the icon** gives a drawn menu rather than the Windows one:
 
-```
-Recording - 5 min buffered        (status)
------------------------------------
-Save last 5 min  (Alt + Insert)
-[x] Recording                     <- turn capture on or off
------------------------------------
-Open nabs folder
-Settings...                       <- what clicking the icon does
-View log
------------------------------------
-Quit
-```
+<div align="center">
 
-**<kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>N</kbd> opens the panel** without
+<img src="docs/media/tray.png" alt="The tray menu: a status block with the mark, the state and a live buffer meter, then six rows" width="248">
+
+</div>
+
+The status block is the point of it. It carries a live meter, and the primary
+row names **what is actually buffered** — twenty seconds in it reads *Nab last
+20 seconds*, not a minute that does not exist yet. With nothing buffered it
+falls back to the configured length and greys out, because a disabled row
+should name the action. The accelerator follows whichever hotkey actually
+registered, which is not always the one configured.
+
+It is drawn on one canvas, so hover is a rounded pill and focus is a ring
+rather than a fill. Every decision — rows, labels, enablement, keyboard order,
+placement — lives in `nabd_tray_model.py`, which is pure stdlib and covered by
+51 checks; the Tk file only draws. One honest cost: a custom menu is
+**invisible to screen readers** and ignores high-contrast themes, which the
+native menu is not.
+
+**<kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>N</kbd> opens the drawer** without
 going near the tray.
 
 <div align="center">
@@ -236,7 +248,7 @@ than letting you find out when a nab turns out to be frozen:
 
 <div align="center">
 
-<img src="docs/media/banner-fail.gif" alt="The failure banner — the same motion on the danger field" width="620">
+<img src="docs/media/banner-fail.gif" alt="The error banner: the card arrives exactly as the save banner does, then shuts both eyes and shakes its head" width="620">
 
 </div>
 
@@ -271,20 +283,43 @@ behaviour anti-cheat systems flag. Nab'd deliberately does not do this.
   helper that draws it stays resident and watches a trigger file, so trigger to
   first pixel is 5–7 ms once its frames are loaded.
 
-  The motion is 4,120 ms in eight beats: a 4px line slides out of the corner,
-  holds, the card stands up out of it, the mark draws itself on and the copy
-  fades up, the dismiss rule drains for 2.6s, then the mark winds back, the card
-  collapses onto the line, holds, and the line withdraws into the corner. Three
-  things carry it and all three are easy to undo by accident — **one axis at a
-  time** (horizontal and vertical never move in the same millisecond, or the two
-  read as a diagonal), **the 60ms and 70ms holds** that separate the beats, and
-  **asymmetric easing**: the collapse decelerates because it comes to rest on the
-  line, and only the final slide accelerates, because it actually leaves.
+  The motion is 4,120 ms: a 4px line slides out of the corner, holds, the card
+  stands up out of it, the mark draws its ring on, grows horns and opens its
+  eyes as the copy fades up, the dismiss rule drains for 2.6s, the mark turns,
+  tilts, squashes and winks as one action and unwinds, then the eyes close, the
+  horns retract, the ring winds back, the card collapses onto the line, holds,
+  and the line withdraws into the corner. Five things carry it and all of them
+  are easy to undo by accident — **one axis at a time** (horizontal and vertical
+  never move in the same millisecond, or the two read as a diagonal), **the 60ms
+  and 70ms holds** that separate the beats, **asymmetric easing** (the collapse
+  decelerates because it comes to rest on the line, and only the final slide
+  accelerates, because it actually leaves), **the horns never translate** —
+  they scale about their roots on the rim, and the only rotation applied pivots
+  at the head's centre, or they visibly tear off — and **the turn is a head
+  turn, not a rotation**: the silhouette holds and the features move across it,
+  where a `rotateY` would read as a squash.
+
+  The eyes finish opening at 900ms, exactly where the ring closes and the
+  sound's B3 resolves — one event, one note. The wink is deliberately silent.
 
   The size is not known when the banner opens — assembly is still running — so
   it appears with the nab length and the figure is filled in afterwards, in
-  place, without restarting the timeline. If the save fails, a red banner
-  corrects it.
+  place, without restarting the timeline.
+- **A failure is the same banner, refusing.** It arrives identically — same
+  slide, same rise, same ring draw, same horns, same eyes landing on 900 — and
+  leaves identically. Only the ground and the gesture in the hold differ: it
+  shuts both eyes and shakes its head, five decaying traverses at about 3 Hz.
+  That is what makes it read at a glance from the corner of a screen. A banner
+  that *arrived* differently would just look like a different app; one that
+  arrives the way you have seen forty times and then refuses is unmistakable.
+
+  The entry and exit tracks are shared with the save banner **by reference**,
+  not copied, and the build asserts that all 247 poses inside those windows
+  render to the identical picture. The ground is `#8E3229` rather than the
+  palette's danger red, because cream on that measures 4.21:1 — which would
+  make the failure copy *harder* to read than the success copy. The sound is
+  the same six beats at the same length and level, with a tritone where the
+  fifth was. The shake, like the wink, is silent.
 - **A nab covers slightly past the keypress.** By design — see `save_delay`.
   Encoding runs with no B-frames and no lookahead so footage reaches disk
   promptly, and ffmpeg runs at above-normal priority so a busy game cannot
@@ -331,25 +366,42 @@ Three rules shaped the code:
   `theme.ACCENT` keep the two roles separate, and the UI tests assert it. The
   installer's wizard panel is the same rule at a larger size — a purple field,
   cream lockup.
-- **The artwork comes from the supplied SVGs.** `render_assets.py` rasterises
-  `brand/*.svg` into `brand/render/*.png` once; the app loads those and scales
-  them down, so the wordmark and mark are the real artwork rather than geometry
-  transcribed into code.
+- **The artwork comes from the supplied SVGs, and nothing redraws it.**
+  `render_assets.py` rasterises `brand/*.svg` into `brand/render/*.png` once;
+  the app loads those and scales them down. `brand.py` holds the artwork's
+  measurements — box sizes, the tile's 22.5% radius, where the mark sits inside
+  it — but uses them only to place and scale the art, never to draw it.
 
-  Two things are still built from the published measurements: the **app tile**
-  (its SVG nests an inner `<svg>` with its own viewBox, which the rasteriser
-  mis-places — the ring came out off-centre with a 7% stroke) and the
-  **animated mark** in the banner, whose 17 sweep frames are generated at build
-  time from the same 295° geometry and asserted against it — at the last frame
-  the sweep *is* the mark, gap open at 1 o'clock, or the build fails. Both are
-  checked against the spec: ring extent 47.5% of the tile, stroke 8.0%,
-  optically centred.
-- **The mark is one stroke, and it never rotates.** The artwork ships as two
-  paths, but the second ends exactly where the first begins, so it is a single
-  295° stroke from 95° with one 65° gap — drawing it as two arcs leaves a seam
-  at the join. The banner traces that stroke on as it arrives and retraces it
-  away as it leaves. Rotating it would turn a ring buffer into a loading
-  spinner, so nothing spins.
+  That is a change. The mark used to be transcribed into arc geometry so Tk
+  could draw it at any size; it is a horned head now, whose horns and eyes are
+  bezier paths, and a transcription would be a second copy of the artwork free
+  to drift from the first. There is deliberately no geometry fallback left: a
+  missing render leaves a hole and a warning, because the old fallback silently
+  drew the retired logo.
+- **The mark never rotates, and the bite stays open.** The ring is a 295.3°
+  stroke with a 64.7° bite at 4 o'clock — the horns have the top. The banner
+  traces that stroke on as it arrives and retraces it away as it leaves, along
+  the same path, which is why the 4,120 ms timeline and the sound files
+  survived the overhaul untouched. Rotating the mark would turn a ring buffer
+  into a loading spinner, so nothing spins; the head *tilts and turns*, pivoted
+  at the neck, which is a different thing.
+- **The horns appear exactly once.** Whichever element is alone wears them: a
+  wordmark on its own is the horned `n`, and every lockup — where the mark is
+  already present — takes the plain one. `brand.wordmark_image()` defaults to
+  plain for that reason, and the mark itself is never modified.
+- **The flipbook is checked by rasterising it, not by asserting on the data.**
+  svglib honours no form of transparency — group `opacity`, path `opacity`,
+  `fill-opacity`, 8-digit hex and `rgba()` all come out fully opaque — and it
+  ignores `stroke-dasharray`/`stroke-dashoffset` too. So `nabd_mark.py` emits
+  the part-drawn ring as *geometry* (`ring_arc(progress)`) and bakes the horn
+  and eye fades into the fill colour (`_mix`), and the horns are drawn under
+  the ring so a part-grown root cannot leave a mixed patch on the rim. Porting
+  the browser techniques verbatim once produced a flipbook with the ring fully
+  drawn in all 254 frames, the horns as permanent stubs and eyes that never
+  opened — with every timeline assertion still green, because none of the data
+  was wrong. `nabd_mark_frames.assert_raster()` counts ink at 0.0 and 1.0 for
+  each channel and is the only thing that can catch it. See
+  `docs/banner/BANNER.md` §5a.
 
 Type is **Outfit** for interface and **JetBrains Mono** for hotkeys, paths,
 durations and nab timestamps, at the published px scale. The installer places
@@ -358,9 +410,10 @@ its own family to Windows, so weights 400/500/600 are selected by family rather
 than by asking Tk for "bold". If a face is ever missing, `brand.font()` degrades
 along the guidelines' own chain to system-ui and ui-monospace.
 
-The tray and the shortcuts both use the purple app tile, rendered per size so
-the 22.5% corner radius and 58% ring hold down to 16px; pausing desaturates the
-field and keeps the silhouette. (The guidelines prefer a monochrome template in
+The tray and the shortcuts both use the purple app tile, resized from the
+supplied artwork so the 22.5% corner radius and the horned silhouette hold down
+to 16px; pausing desaturates the field and keeps the shape. (The guidelines
+prefer a monochrome template in
 a tray, on the grounds that Windows draws it over unknown wallpaper — the tile
 was the explicit choice here, and the same document argues the field treatment
 is what survives at small sizes.)
@@ -372,7 +425,8 @@ python build.py
 ```
 
 Three stages — gather the payload, freeze, package — ending at
-`dist\NabdSetup-2.1.0.exe` (~70 MB).
+`dist\NabdSetup-<version>.exe` (~75 MB). The version comes from `nabd.VERSION`,
+and `build.py` refuses to build if `installer.iss` disagrees with it.
 
 Needs on the build machine:
 
@@ -414,12 +468,17 @@ does not.
 | `nabd.py` | The application, and the frozen entry point for all three modes |
 | `settings.py` | Settings window (own process — tkinter can't share the tray's thread) |
 | `banner.py` | The confirmation banner: window, assets and drawing |
-| `nabd_banner.py` | Its motion, as data. `sample(ms)` -> every animated value |
+| `nabd_banner.py` | The save motion, as data. `sample(ms)` -> every animated value |
+| `nabd_banner_error.py` | The error motion. Imports `nabd_banner` and shares its entry and exit tracks **by reference** — only the gesture in the hold differs |
 | `nabd_ease.py` | CSS-identical cubic-bezier easing, because Tk has none |
-| `nabd_banner_frames.py` | Build-time frame generation, with the assertion that frame 16 is the mark |
-| `make_banner_assets.py` | Runs the above for both field colours |
-| `assets/banner/` | 432 pre-rendered frames: 4 DPI scales x 2 fields |
-| `brand.py` | Palette, type scale, and the logo drawn from its published geometry |
+| `nabd_mark.py` | The mark's paths as supplied, plus the arithmetic that poses them |
+| `nabd_mark_frames.py` | Build-time flipbook, and `index_for(t)` — the contract the banner reads it back through |
+| `nabd_mark_frames_error.py` | The same for the error banner, plus `assert_shared_with_save()` |
+| `make_banner_assets.py` | Cards and both flipbooks, for both field colours |
+| `assets/banner/` | Pre-rendered cards and mark poses: 4 DPI scales x 2 outcomes |
+| `nabd_tray_model.py` | Every tray-menu decision — rows, labels, enablement, metrics, placement. Pure stdlib, so it is testable anywhere |
+| `nabd_tray_menu.py` | The tray menu's Tk view and Win32 work. No decisions |
+| `brand.py` | Palette, type scale, and the logo placed from the supplied artwork |
 | `nabd_tokens.py` | Every colour and metric in the panel, with DPI scaling |
 | `nabd_paint.py` | Pillow renderers for what Tk cannot draw — rounded rects, gradients, the toggle, the meter |
 | `nabd_ui.py` | The panel's widget set, built on those two |

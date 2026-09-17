@@ -32,7 +32,6 @@ print(f"official SVG  : {brand.LOCK_WIDTH:.0f}x{brand.LOCK_HEIGHT:.0f} "
 word = brand.wordmark_image(17)
 print(f"\nwordmark @17px: {word.width}x{word.height}  "
       f"aspect {word.width / word.height:.2f}")
-print(f"expected aspect: "
-      f"{(brand.WORD_RIGHT - brand.WORD_LEFT + brand.WORD_STROKE) / (brand.WORD_HEIGHT + brand.WORD_STROKE):.2f}")
+print(f"expected aspect: {brand.WORD_BOX_W / brand.WORD_BOX_H:.2f}")
 print(f"stroke at that size: "
       f"{brand.WORD_STROKE * 17 / brand.WORD_HEIGHT:.2f}px")

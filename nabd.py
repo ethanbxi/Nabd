@@ -36,7 +36,12 @@ DISPLAY_NAME = "Nab'd"  # anything the user actually reads
 # Shown in the window's rail. installer.iss carries the same number for the
 # package, and build.py refuses to build if the two disagree - there is no way
 # for Inno to read this file, so the check is the link between them.
-VERSION = "2.2.0"
+VERSION = "2.3.6"
+
+# The drawn tray menu (nabd_tray_menu). Set False to go straight back to
+# pystray's native Win32 menu, which is left fully built either way - the
+# drawn one is a hook over the top of it, not a replacement for it.
+USE_DRAWN_TRAY_MENU = True
 APP_DIR = Path(__file__).resolve().parent
 
 # Frozen, the code and the artwork live wherever the installer put them - which
@@ -378,7 +383,19 @@ def probe_encoder(ffmpeg, preferred="auto"):
 
 def encoder_flags(name, cq, maxrate, preset):
     """Quality settings per encoder family - they share no vocabulary."""
-    common = ["-maxrate", maxrate, "-bufsize", maxrate, "-bf", "0"]
+    # -forced_idr makes a forced keyframe a real IDR. Without it, the keyframes
+    # -force_key_frames asks for come back as plain I-frames on the hardware
+    # encoders, and the segment muxer only ever splits on an IDR - so the whole
+    # buffer becomes ONE endlessly growing .ts, segments() never sees a second
+    # file, and every nab fails with "buffer still filling".
+    #
+    # Measured on h264_qsv: 10s of capture gave 1 segment instead of 5, and
+    # adding this gave 5. It was invisible on the machine this was written on
+    # because h264_nvenc happens to emit IDRs for forced keyframes anyway; it
+    # bites on any box that probes to QSV or AMF. All four encoders accept the
+    # option, so it goes in common rather than being repeated per family.
+    common = ["-forced_idr", "1",
+              "-maxrate", maxrate, "-bufsize", maxrate, "-bf", "0"]
     if name.endswith("nvenc"):
         # No B-frames or lookahead: both hold frames inside the encoder, which
         # costs GPU time and delays footage reaching disk.
@@ -1707,6 +1724,123 @@ def make_icon(recording):
     return brand.tile_image(64, field="#2E2B36", ring="#847F8D")
 
 
+def hotkey_caption(spec):
+    """'alt+insert' -> 'Alt+Ins', for the tray menu's accelerator column.
+
+    Compact, unlike settings.py's spaced "Alt + Insert": this one is
+    right-aligned in a 248px menu at 10.5px mono, and the reference sets it
+    tight. The abbreviations are the ones keyboards actually print.
+    """
+    SHORT = {"insert": "Ins", "delete": "Del", "escape": "Esc",
+             "pageup": "PgUp", "pagedown": "PgDn", "control": "Ctrl",
+             "ctrl": "Ctrl", "backspace": "Bksp", "printscreen": "PrtSc"}
+    out = []
+    for part in (spec or "").split("+"):
+        if not part:
+            continue
+        low = part.lower()
+        out.append(SHORT.get(low, part.upper() if len(part) == 1
+                             else part.capitalize()))
+    return "+".join(out)
+
+
+class _TrayMenuHost:
+    """The drawn tray menu, on a Tk thread of its own.
+
+    nab'd runs pystray's Win32 message pump on the main thread, and this app's
+    own architecture says tkinter cannot share that thread - it is exactly why
+    the banner and the settings panel are separate processes. So the menu
+    cannot simply be built here.
+
+    It also cannot reasonably live in one of those other processes: everything
+    it shows - whether capture is running, how many seconds are actually
+    buffered - is state that exists only here, and the meter is live while the
+    menu is open. Pushing that over a trigger file every 250 ms would be a lot
+    of IPC for a context menu.
+
+    So Tk gets a thread of its own, owning its own root, and every Tk call
+    happens on it. The pump thread only ever puts a request on a queue; the Tk
+    thread picks it up on its own `after` tick. Nothing calls Tk across a
+    thread boundary, which is the rule that makes this safe rather than lucky.
+
+    If any of it fails to start, `ok` stays False and the caller leaves
+    pystray's native menu in place. A square native menu is a far better
+    outcome than a right-click that does nothing.
+    """
+
+    POLL_MS = 16              # a frame; the queue is almost always empty
+    START_TIMEOUT_S = 10.0
+
+    def __init__(self, on_action, state_fn):
+        self.on_action = on_action
+        self.state_fn = state_fn
+        self.ok = False
+        self._q = queue.Queue()
+        self._ready = threading.Event()
+        self._root = None
+        self._menu = None
+        threading.Thread(target=self._run, daemon=True,
+                         name="tray-menu").start()
+        self._ready.wait(self.START_TIMEOUT_S)
+
+    def _run(self):
+        try:
+            import tkinter as tk
+            import brand
+            import nabd_tokens as T
+            from nabd_tray_menu import TrayMenu
+            root = tk.Tk()
+            root.withdraw()
+            # Built once, withdrawn, and only moved and shown afterwards.
+            # Creating a Toplevel on right-click is visibly slower than the
+            # native menu, and "the menu is laggy" is the one review a custom
+            # menu cannot survive.
+            self._menu = TrayMenu(root, on_action=self._dispatch,
+                                  brand=brand, tokens=T)
+            self._root = root
+            self.ok = True
+        except Exception as exc:
+            log(f"drawn tray menu unavailable; keeping the native one: {exc}")
+            self._ready.set()
+            return
+        self._ready.set()
+        root.after(self.POLL_MS, self._pump)
+        try:
+            root.mainloop()
+        except Exception as exc:
+            log(f"tray menu loop ended: {exc}")
+
+    def _pump(self):
+        # Drained and coalesced: two right-clicks that land inside one tick are
+        # one toggle, not an open followed by an immediate close.
+        wanted = False
+        try:
+            while True:
+                self._q.get_nowait()
+                wanted = True
+        except queue.Empty:
+            pass
+        if wanted:
+            try:
+                self._menu.toggle(self.state_fn(), state_fn=self.state_fn)
+            except Exception as exc:
+                log(f"tray menu failed to open: {exc}")
+        try:
+            self._root.after(self.POLL_MS, self._pump)
+        except Exception:
+            pass
+
+    def request_toggle(self):
+        """Called from the pump thread. Never touches Tk."""
+        self._q.put(True)
+
+    def _dispatch(self, key):
+        try:
+            self.on_action(key)
+        except Exception as exc:
+            log(f"tray menu action {key!r} failed: {exc}")
+
+
 class Tray:
     def __init__(self, app):
         import pystray
@@ -1733,6 +1867,68 @@ class Tray:
                 pystray.MenuItem("Quit", self._quit),
             ),
         )
+        # The native menu above stays fully built. The drawn one is hooked over
+        # the top of it, so a failure anywhere in Tk or Win32 lands back on a
+        # working menu rather than on a dead right-click.
+        self.menu_host = None
+        if USE_DRAWN_TRAY_MENU:
+            self.menu_host = _TrayMenuHost(self._menu_action, self.menu_state)
+            if self.menu_host.ok:
+                self._hook_right_click()
+            else:
+                self.menu_host = None
+
+    # -- the drawn menu ----------------------------------------------------
+
+    def menu_state(self):
+        """What the menu shows. Read fresh every 250ms while it is open.
+
+        buffered_s is what is ACTUALLY on disk, not the configured length:
+        offering "Nab last minute" twenty seconds in is a promise the app
+        cannot keep, and the model turns this into "Nab last 20 seconds" with
+        the meter at 33%. capacity_s and the accelerator both follow the user's
+        own settings, and the accelerator names the key that actually
+        registered - which is not always the one configured.
+        """
+        from nabd_tray_model import State
+        return State(
+            recording=self.app.recorder.running,
+            buffered_s=int(self.app.recorder.buffered_seconds),
+            capacity_s=int(self.cfg["clip_seconds"]),
+            hotkey=hotkey_caption(self._working_key() or self.cfg["hotkey"]))
+
+    def _menu_action(self, key):
+        """Dispatch on the row's stable key, never on its label."""
+        actions = {"nab": self._clip, "toggle": self._toggle,
+                   "folder": self._open_clips, "settings": self.open_settings,
+                   "log": self._view_log, "quit": self._quit}
+        action = actions.get(key)
+        if action:
+            action()
+
+    def _hook_right_click(self):
+        """Send right-click to the drawn menu instead of TrackPopupMenuEx.
+
+        pystray offers no hook for this, so its WM_NOTIFY handler is wrapped.
+        Only WM_RBUTTONUP is taken; left-click and everything else fall through
+        to the original, so the default-item behaviour is untouched and any
+        message this does not understand still reaches pystray.
+        """
+        try:
+            from pystray._util import win32
+            original = self.icon._message_handlers[win32.WM_NOTIFY]
+
+            def handler(wparam, lparam):
+                if lparam == win32.WM_RBUTTONUP:
+                    self.menu_host.request_toggle()
+                    return 0
+                return original(wparam, lparam)
+
+            self.icon._message_handlers[win32.WM_NOTIFY] = handler
+            log("tray: drawn menu active")
+        except Exception as exc:
+            log(f"could not hook the tray right-click; native menu: {exc}")
+            self.menu_host = None
 
     def _blocked_key(self):
         """The nab hotkey, if another app got to it first.
@@ -1814,7 +2010,28 @@ class Tray:
         os.startfile(path)
 
     def open_settings(self):
-        self.app.open_settings()
+        """Open the WINDOW, not the slide-out drawer.
+
+        The drawer is the hotkey's surface: it slides in over whatever is in
+        front, which is what you want mid-game without leaving it. Reaching the
+        tray means you are already at the desktop with a mouse in hand, and the
+        window is the fuller surface - the same reasoning that already sends a
+        second launch of the exe to the window rather than the drawer.
+
+        ASFW_ANY rather than a pid: the window may already be up, started by
+        some earlier launch, so this process has no id to name. Without handing
+        the foreground right over, window.raise_window()'s focus_force is
+        refused and the window surfaces behind whatever is in front.
+        """
+        try:
+            ctypes.windll.user32.AllowSetForegroundWindow(-1)
+        except Exception:
+            pass
+        if not signal_window():
+            # Whatever stopped the window starting, a dead menu item is worse
+            # than the other surface.
+            log("window would not open from the tray; falling back to the drawer")
+            self.app.open_settings()
 
     def _view_log(self):
         LOG_PATH.touch(exist_ok=True)
@@ -1932,6 +2149,19 @@ class App:
             log(f"banner helper failed to start: {exc}")
             self._banner = None
 
+    def _banner_sound(self, ok):
+        """Which cue a banner carries, given the user's preference.
+
+        The setting is one choice about the success cue; the error cue is not
+        offered as an option because it is not a preference - it is what a
+        failure sounds like. "off" is the one answer that has to carry to both,
+        since it is about being chimed at at all.
+        """
+        chosen = self.cfg.get("capture_sound", "pip")
+        if chosen == "off":
+            return "off"
+        return chosen if ok else "error"
+
     def show_banner(self, title, detail="", ok=True, token="", sound=None):
         """Fire-and-forget: a file write, so the keypress feels immediate.
 
@@ -1956,8 +2186,15 @@ class App:
             # The helper is long-lived and holds no config of its own, so the
             # choice rides with the payload rather than being read at the far
             # end - where it would be whatever it was when the helper started.
-            "sound": ((self.cfg.get("capture_sound", "pip") if ok else "off")
-                      if sound is None else sound),
+            #
+            # A failure used to be silent, because the only cue that existed
+            # was a confirmation and playing it would have said the opposite of
+            # what happened. There is a dedicated error cue now - same six
+            # beats, same length and level, a tritone where the fifth was - so
+            # a failure speaks with its own voice. Still silent if the user
+            # turned the sound off: that is a preference about being chimed at,
+            # not about which chime.
+            "sound": (self._banner_sound(ok) if sound is None else sound),
             "token": token}
         self._write_banner(dict(self._banner_base, detail=detail))
 

@@ -89,6 +89,10 @@ def payload():
     class FakeApp:
         cfg = dict(nabd.DEFAULTS)
         show_banner = nabd.App.show_banner
+        # Borrowed rather than reimplemented: this test exists to prove the
+        # real decision reaches the trigger, so a stand-in here would prove
+        # nothing about the app.
+        _banner_sound = nabd.App._banner_sound
 
         def ensure_banner_helper(self):
             pass
@@ -109,12 +113,21 @@ def payload():
     check("switching it off carries through",
           written.get("sound") == "off", repr(written.get("sound")))
 
-    # A confirmation sound on "Capture Lost" would be telling the user the
-    # opposite of what happened.
+    # A failure used to stay silent, because the only cue that existed was a
+    # confirmation and playing it would have told the user the opposite of what
+    # happened. There is a dedicated error cue now, so it speaks with its own
+    # voice - same six beats and the same length, a tritone where the fifth was.
     app.cfg["capture_sound"] = "pip"
     app.show_banner("Capture Lost", "", ok=False, token="nab3")
-    check("a failure banner stays silent", written.get("sound") == "off",
-          repr(written.get("sound")))
+    check("a failure banner plays the error cue",
+          written.get("sound") == "error", repr(written.get("sound")))
+
+    # ...but "off" is a preference about being chimed at at all, not about
+    # which chime, so it has to carry to the failure cue too.
+    app.cfg["capture_sound"] = "off"
+    app.show_banner("Capture Lost", "", ok=False, token="nab4")
+    check("switching sound off silences failures too",
+          written.get("sound") == "off", repr(written.get("sound")))
 
     # Colour and sound are separate decisions, so a banner can be purple and
     # silent at once - which is what "Still saving" has to be.

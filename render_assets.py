@@ -18,11 +18,20 @@ RENDER = BRAND / "render"
 
 # Rendered tall enough that every on-screen size is a downscale, never an
 # upscale. LANCZOS down from this is indistinguishable from native.
+#
+# Both wordmarks are rendered. The horn rule (OVERHAUL.md section 2) is a
+# choice made at the point of use, not at render time: the lockups need the
+# plain one and a wordmark standing alone needs the horned one, so brand.py
+# has to be able to reach either.
 TARGETS = {
-    "nabd-wordmark-cream.svg": 512,
-    "nabd-wordmark-ink.svg": 512,
+    "nabd-wordmark-plain-cream.svg": 512,
+    "nabd-wordmark-plain-ink.svg": 512,
+    "nabd-wordmark-horned-cream.svg": 512,
+    "nabd-wordmark-horned-ink.svg": 512,
     "nabd-lockup-cream.svg": 512,
     "nabd-lockup-ink.svg": 512,
+    "nabd-stacked-cream.svg": 512,
+    "nabd-stacked-ink.svg": 512,
     "nabd-mark-cream.svg": 512,
     "nabd-mark-ink.svg": 512,
     "nabd-app-tile-512.svg": 1024,

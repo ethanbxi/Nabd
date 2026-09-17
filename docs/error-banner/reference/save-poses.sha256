@@ -1,0 +1,4 @@
+# sha256 of pose_svg(nabd_banner.sample(t), size=200) for t in range(0, 4120, 2),
+# taken from the ORIGINAL nabd_mark.py before the `shut` channel was added.
+# verify_error.py recomputes this with the patched module. They must match.
+24660590b14152a737ccd5be80d200957c6341b3409269e6fb444142b8fe9df7  2060

@@ -28,7 +28,7 @@ three in reverse as it leaves:
 |---|---|---|
 | 0 | line slides out of the corner | air — a breath, barely there |
 | 320 | card stands up | **E3**, the gesture |
-| 900 | ring completes its 295° draw | **B3**, the resolve |
+| 900 | ring closes **and the eyes finish opening** | **B3**, the resolve |
 | 620–3200 | banner holds, rule draining | *silence* |
 | 3200 | ring winds back | **B3** |
 | 3630 | card collapses onto the line | **E3**, falling |
@@ -42,6 +42,14 @@ collapsing answers the card rising.
 
 The exit sits 9–12 dB under the entry. It is an answer, not a second
 announcement.
+
+**The wink is silent, deliberately.** The brand overhaul added a gesture in the
+middle of the hold — the mark turns, tilts, squashes and winks between 1,500 and
+2,520 ms. The sound marks structural events; the wink is character. Scoring it
+would need a new 4,120 ms render and would turn a one-second gesture into a
+second announcement, which is the thing the exit level is already protecting
+against. The eyes were instead timed to land on 900, so the resolve marks the
+ring closing *and* the daemon arriving: one event, one note.
 
 **Character.** E3 over an E2, nothing above 1.2 kHz, spectral centre 169 Hz.
 Every attack is 30–70 ms of raised cosine — nothing in the file is struck, which

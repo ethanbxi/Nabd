@@ -41,7 +41,18 @@ a = Analysis(
     hiddenimports=[
         "settings", "banner", "brand", "window", "nabd_window",
         "nabd_tokens", "nabd_paint", "nabd_ui",
+        # nabd_mark carries the artwork's measurements for brand.py and
+        # nabd_mark_frames carries index_for() for banner.py. Both are
+        # stdlib-only at runtime; the svglib render path is inside a function
+        # and never reached in a frozen build, which is why svglib stays in
+        # excludes below.
         "nabd_banner", "nabd_ease", "nabd_panel_open",
+        "nabd_mark", "nabd_mark_frames",
+        # The error banner's twin of the two above.
+        "nabd_banner_error", "nabd_mark_frames_error",
+        # The drawn tray menu. Imported inside _TrayMenuHost._run and
+        # Tray.menu_state rather than at module scope, so name them here.
+        "nabd_tray_model", "nabd_tray_menu",
         "pyaudiowpatch", "pystray._win32",
         "PIL.ImageTk", "PIL._tkinter_finder",
         "tkinter", "tkinter.filedialog", "tkinter.font",

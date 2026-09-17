@@ -55,23 +55,20 @@ def panel(width, height):
     img = _field(width, height)
 
     # One oversized mark rising out of the bottom edge, a shade deeper than
-    # the field it sits on. Centred so the 1 o'clock gap stays visible and it
-    # reads as the mark rather than as stray shapes - texture, not a second
+    # the field it sits on. Centred so the bite at 4 o'clock stays visible and
+    # it reads as the mark rather than as stray shapes - texture, not a second
     # logo, which is why the contrast against the field is this low.
     wm_size = int(width * 1.04)
-    wm = brand.ring_image(wm_size, brand.PURPLE_DEEP)
+    wm = brand.mark_image(wm_size, brand.PURPLE_DEEP)
     img.paste(wm, ((width - wm_size) // 2, int(height - wm_size * 0.58)), wm)
 
-    # Stacked lockup: mark over wordmark, sitting in the upper third.
-    mark_size = int(width * 0.40)
-    mark = brand.ring_image(mark_size, brand.CREAM)
-    word = brand.wordmark_image(int(width * 0.19), brand.CREAM)
-    gap = int(width * 0.10)
-
-    block_h = mark.height + gap + word.height
-    top = int(height * 0.30) - block_h // 2
-    img.paste(mark, ((width - mark.width) // 2, top), mark)
-    img.paste(word, ((width - word.width) // 2, top + mark.height + gap), word)
+    # The stacked lockup as supplied, sitting in the upper third. Composing it
+    # here from a mark and a wordmark would be a third arrangement of the two
+    # to keep in step - and it would be the place the horn rule got broken,
+    # since the supplied artwork already carries the plain n.
+    stack = brand.stacked_image(int(width * 0.74), brand.CREAM)
+    img.paste(stack, ((width - stack.width) // 2,
+                      int(height * 0.30) - stack.height // 2), stack)
     return img
 
 

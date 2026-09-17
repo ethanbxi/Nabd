@@ -29,8 +29,13 @@ from PIL import Image, ImageTk
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import nabd  # noqa: E402
 import nabd_banner as M  # noqa: E402
+import nabd_banner_error as ERR  # noqa: E402
 import nabd_sound  # noqa: E402
 import nabd_tokens as T  # noqa: E402
+# index_for is the contract between the build and the runtime: pure, stdlib
+# only, so importing these does not drag svglib into the banner process.
+import nabd_mark_frames as SAVE_FRAMES  # noqa: E402
+import nabd_mark_frames_error as ERR_FRAMES  # noqa: E402
 
 # Take the trigger path from nabd rather than deriving it here. Frozen, this
 # module lives inside the bundle, so __file__ points into _internal while the
@@ -43,13 +48,31 @@ CREAM = "#F3EFE9"          # title
 DETAIL_FG = "#E3D8F5"      # figures
 RULE = "#F3EFE9"           # dismiss rule, drawn at 75% over the field
 RULE_ALPHA = 0.75
-FIELD = {"ok": T.PURPLE, "fail": T.DANGER}
-FIELD_LINE = {"ok": T.PURPLE_LIGHT, "fail": "#D2665C"}
+# One banner, two outcomes. Everything that differs between them is in this
+# table, so the drawing code below never asks which kind it is - the error
+# path is a parameter, not a second copy of the banner.
+#
+# The two timelines are 4,120 ms and share their entry and exit tracks BY
+# REFERENCE (nabd_banner_error imports them), so the card arrives and leaves
+# identically and only the gesture in the hold differs. That is the design:
+# a banner that arrived differently would just look like a different app.
+TIMELINE = {"ok": (M, SAVE_FRAMES), "fail": (ERR, ERR_FRAMES)}
+# Not --danger #B4483E. Cream on that is 4.21:1, which would make the failure
+# copy harder to read than the success copy; #8E3229 puts it at 6.28:1. See
+# docs/error-banner/ERROR.md section 5.
+FIELD = {"ok": T.PURPLE, "fail": ERR.FIELD}
+FIELD_LINE = {"ok": T.PURPLE_LIGHT, "fail": ERR.FIELD_EDGE}
 
-# Layout inside the 308x76 card, CSS px. The ring and the two text lines share
+# Layout inside the 308x76 card, CSS px. The mark and the two text lines share
 # a centre line; the rule sits on the bottom edge.
-PAD_X, RING, GAP = 20, 30, 16
-RING_CY, TITLE_CY, DETAIL_CY = 37, 28, 48
+#
+# The three horizontal numbers come from nabd_tokens so the flipbook is baked
+# at exactly the size it is blitted at - see the note there. They are the
+# approved preview's, which the reference GIF was rendered from.
+PAD_X, MARK, TEXT_X = T.BANNER_MARK_X, T.BANNER_MARK, T.BANNER_TEXT_X
+# 38 is the true centre of the 76px card. The mark's box is centred on it, as
+# the reference centres it in the card's interior.
+MARK_CY, TITLE_CY, DETAIL_CY = 38, 28, 48
 RULE_H = 3
 COPY_RISE = 6              # px the mark and copy travel as they fade up
 
@@ -152,10 +175,12 @@ def asset_dir(scale, kind):
 
 
 class Assets:
-    """The pre-rendered card and ring frames for one scale and field colour.
+    """The pre-rendered card and mark frames for one scale and field colour.
 
-    Generated at build time (nabd_banner_frames.py). Rendering rounded
-    rectangles in Pillow at launch would hand back exactly what onedir bought.
+    Generated at build time (make_banner_assets.py). Rendering rounded
+    rectangles in Pillow at launch would hand back exactly what onedir bought,
+    and the mark poses now - it tilts, turns, squashes and winks - so it could
+    not be one cached PNG with an arc drawn over it even if we wanted that.
     """
 
     def __init__(self, scale, kind):
@@ -163,19 +188,26 @@ class Assets:
         self.kind = kind
         self.dir = asset_dir(scale, kind)
         self.field = FIELD[kind]
-        self._rings = {}
+        self._marks = {}
         self._cards = {}
         self._photo = {}
 
-    def ring(self, index, opacity):
-        """Frame `index` of 16, faded toward the field it sits on."""
+    def mark(self, index, opacity):
+        """Flipbook frame `index`, faded toward the field it sits on.
+
+        The frames are baked on the field already, so the fade is a blend
+        between two opaque images rather than a composite - which is why they
+        are baked that way: keying a transparent PNG onto the card left a white
+        fringe on every antialiased edge.
+        """
         step = round(max(0.0, min(1.0, opacity)) * 8)
-        key = ("ring", index, step)
+        key = ("mark", index, step)
         if key not in self._photo:
-            img = self._rings.get(index)
+            img = self._marks.get(index)
             if img is None:
-                img = Image.open(self.dir / f"ring_{index:02d}.png").convert("RGB")
-                self._rings[index] = img
+                img = Image.open(
+                    self.dir / f"mark_{index:04d}.png").convert("RGB")
+                self._marks[index] = img
             if step < 8:
                 flat = Image.new("RGB", img.size, _rgb(self.field))
                 img = Image.blend(flat, img, step / 8.0)
@@ -264,6 +296,9 @@ class Banner:
         self.ready = ready
         self._waiting = False       # clicked, but the nab is still assembling
         self.kind = kind if kind in FIELD else "ok"
+        # Which timeline this banner performs, and which flipbook it blits.
+        # Both are 4,120 ms, so everything below is shared.
+        self.motion, self.frames = TIMELINE[self.kind]
         self.field = FIELD[self.kind]
         self.title = title
         self.detail = detail
@@ -302,7 +337,7 @@ class Banner:
         # the top that pixel landed on the fixed bottom edge and the card
         # wobbled for ~6 frames of every rise and collapse.
         self.card_item = self.canvas.create_image(0, 0, anchor="sw")
-        self.ring_item = self.canvas.create_image(0, 0, anchor="nw", state="hidden")
+        self.mark_item = self.canvas.create_image(0, 0, anchor="nw", state="hidden")
         self.title_item = self.canvas.create_text(
             0, 0, anchor="w", text=title, fill=self.field,
             font=(T.FONT_UI_MEDIUM, -self.px(15)))
@@ -339,7 +374,7 @@ class Banner:
         # Hard stop, in case a frame callback is ever lost: the banner must not
         # be able to sit on screen forever.
         self._guard = self.root.after(
-            int(start_at * 1000) + M.TOTAL_MS + 1500, self.finish)
+            int(start_at * 1000) + self.motion.TOTAL_MS + 1500, self.finish)
 
     # -- placement ---------------------------------------------------------
 
@@ -415,17 +450,17 @@ class Banner:
             # exit brings the card back up instead of leaving it half folded.
             t = min(t, HOLD_MS)
             self.start = time.perf_counter() - t / 1000.0
-        if t >= M.TOTAL_MS:
+        if t >= self.motion.TOTAL_MS:
             self.finish()
             return
         try:
-            self.draw(M.sample(t))
+            self.draw(t, self.motion.sample(t))
         except tk.TclError:
             self.finish()
             return
         self.root.after(FRAME_MS, self._tick)
 
-    def draw(self, f):
+    def draw(self, t, f):
         px, canvas = self.px, self.canvas
         w, h = max(1, px(f.w)), max(1, px(f.h))
 
@@ -442,20 +477,26 @@ class Banner:
         canvas.coords(self.card_item, 0, h)
 
         if f.copy <= 0.001:
-            canvas.itemconfigure(self.ring_item, state="hidden")
+            canvas.itemconfigure(self.mark_item, state="hidden")
             canvas.itemconfigure(self.title_item, text="")
             canvas.itemconfigure(self.detail_item, text="")
         else:
             rise = px(COPY_RISE) * (1.0 - f.copy)
-            index = int(round(f.ring * 16))
-            if index > 0:
-                canvas.itemconfigure(self.ring_item, state="normal",
-                                     image=self.assets.ring(index, f.copy))
-                canvas.coords(self.ring_item, px(PAD_X),
-                              px(RING_CY - RING / 2) + rise)
+            # Hidden while there is no mark to show, rather than whenever the
+            # flipbook is outside a motion window. index_for() answers REST -
+            # the assembled mark - for every instant it does not cover, which
+            # includes the 112 ms after the ring has wound back to nothing but
+            # before the copy has finished fading. Blitting REST there popped
+            # the whole head back on screen at the end of the exit.
+            if f.ring > 0.0 or f.horns > 0.0 or f.eyes > 0.0:
+                canvas.itemconfigure(
+                    self.mark_item, state="normal",
+                    image=self.assets.mark(self.frames.index_for(t), f.copy))
+                canvas.coords(self.mark_item, px(PAD_X),
+                              px(MARK_CY - MARK / 2) + rise)
             else:
-                canvas.itemconfigure(self.ring_item, state="hidden")
-            tx = px(PAD_X + RING + GAP)
+                canvas.itemconfigure(self.mark_item, state="hidden")
+            tx = px(TEXT_X)
             canvas.itemconfigure(self.title_item, text=self.title,
                                  fill=mix(self.field, CREAM, f.copy))
             canvas.coords(self.title_item, tx, px(TITLE_CY) + rise)

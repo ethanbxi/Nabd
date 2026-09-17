@@ -17,14 +17,20 @@ from PIL import Image, ImageDraw, ImageFont     # noqa: E402
 
 import banner as B                              # noqa: E402
 import nabd_banner as M                         # noqa: E402
+from nabd_mark_frames import index_for          # noqa: E402
 
 FONTS = HERE.parent / "vendor" / "fonts"
 TITLE_F = ImageFont.truetype(str(FONTS / "Outfit-Medium.ttf"), 15)
 DETAIL_F = ImageFont.truetype(str(FONTS / "JetBrainsMono-Regular.ttf"), 12)
 
 
-def compose(f, title, detail, kind="ok", backdrop=(24, 24, 28)):
-    """One frame, on a backdrop so the chroma-keyed corners are visible."""
+def compose(t, title, detail, kind="ok", backdrop=(24, 24, 28)):
+    """One frame, on a backdrop so the chroma-keyed corners are visible.
+
+    Takes the time, not a sampled frame: the mark is a flipbook indexed by t
+    now, so sampling here keeps the card and the mark on the same instant.
+    """
+    f = M.sample(t)
     field = B.FIELD[kind]
     d = B.asset_dir(1.0, kind)
     w, h = max(1, f.w), max(1, f.h)
@@ -47,14 +53,15 @@ def compose(f, title, detail, kind="ok", backdrop=(24, 24, 28)):
     draw = ImageDraw.Draw(layer)
     if f.copy > 0.001:
         rise = int(round(B.COPY_RISE * (1.0 - f.copy)))
-        i = int(round(f.ring * 16))
-        if i > 0:
-            ring = Image.open(d / f"ring_{i:02d}.png").convert("RGB")
+        if f.ring > 0.0 or f.horns > 0.0 or f.eyes > 0.0:
+            mark = Image.open(
+                d / f"mark_{index_for(t):04d}.png").convert("RGB")
             if f.copy < 1.0:
-                ring = Image.blend(Image.new("RGB", ring.size, B._rgb(field)),
-                                   ring, f.copy)
-            layer.paste(ring, (B.PAD_X, B.RING_CY - B.RING // 2 + rise))
-        tx = B.PAD_X + B.RING + B.GAP
+                mark = Image.blend(Image.new("RGB", mark.size, B._rgb(field)),
+                                   mark, f.copy)
+            layer.paste(mark, (int(B.PAD_X),
+                               int(B.MARK_CY - B.MARK / 2) + rise))
+        tx = int(B.TEXT_X)
         draw.text((tx, B.TITLE_CY + rise), title, anchor="lm",
                   fill=B.mix(field, B.CREAM, f.copy), font=TITLE_F)
         draw.text((tx, B.DETAIL_CY + rise), detail, anchor="lm",
@@ -81,7 +88,7 @@ def compose(f, title, detail, kind="ok", backdrop=(24, 24, 28)):
 
 
 def strip(times, title, detail, kind, name):
-    frames = [compose(M.sample(t), title, detail, kind) for t in times]
+    frames = [compose(t, title, detail, kind) for t in times]
     cw, ch = frames[0].size
     sheet = Image.new("RGB", (cw, ch * len(frames)), (10, 10, 12))
     for i, fr in enumerate(frames):
@@ -94,7 +101,9 @@ if __name__ == "__main__":
     print("entry  ", strip([60, 200, 300, 400, 520, 700, 900],
                            "Nabbed", "5:00 · 1.2 GB", "ok",
                            "banner_entry.png"))
-    print("rest   ", strip([1200, 2400, 3100],
+    # 1200 resting, then the gesture: anticipation, the turn-tilt-squash-wink
+    # as one action, the hold, the eye reopening, and the unwind past level.
+    print("rest   ", strip([1200, 1600, 1800, 1950, 2150, 2400, 3100],
                            "Nabbed", "5:00 · 1.2 GB", "ok",
                            "banner_rest.png"))
     print("exit   ", strip([3300, 3500, 3620, 3700, 3800, 3870, 4000, 4100],

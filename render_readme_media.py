@@ -1,7 +1,8 @@
 """Render the README artwork, off the app's own motion data.
 
-Everything here is driven by nabd_banner.py / nabd_banner_frames.py so the GIF
-is the real 4,120 ms timeline, not an impression of it.
+Everything here is driven by nabd_banner.py and nabd_mark_frames.py so the GIF
+is the real 4,120 ms timeline, not an impression of it - including the mark's
+pose, which is rasterised from the same SVG the shipped flipbook is baked from.
 
     python render_readme_media.py docs/media --fonts vendor/fonts
 """
@@ -15,7 +16,10 @@ sys.path.insert(0, str(REPO))
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 import nabd_banner as M
-import nabd_banner_frames as F
+import nabd_banner_error as ERR
+import nabd_mark_frames as F
+import nabd_mark_frames_error as FE
+from make_banner_assets import card as card_image
 
 PURPLE      = "#6C3BAA"
 PURPLE_LIGHT= "#9B6BD8"
@@ -28,8 +32,13 @@ SHELL       = "#0A0A0C"
 DANGER      = "#B4483E"
 
 RULE_ALPHA = 0.75
-PAD_X, RING, GAP = 20, 30, 16
-RING_CY, TITLE_CY, DETAIL_CY = 37, 28, 48
+import nabd_tokens as T                  # noqa: E402  (layout, shared)
+
+# The mark's posed box and the copy's left edge, from the approved preview via
+# nabd_tokens - the same numbers banner.py blits and make_banner_assets bakes,
+# so the README GIF shows the mark at the size the app actually draws it.
+PAD_X, MARK, TEXT_X = T.BANNER_MARK_X, T.BANNER_MARK, T.BANNER_TEXT_X
+MARK_CY, TITLE_CY, DETAIL_CY = 38, 28, 48
 RULE_H, COPY_RISE = 3, 6
 MARGIN_RIGHT, MARGIN_TOP = 24, 64
 
@@ -116,10 +125,23 @@ def backdrop(w, h, scale):
 
 
 # ------------------------------------------------------------ the banner ----
-def draw_banner(bg, frame, fonts, scale, title, detail, field=PURPLE,
-                field_line=PURPLE_LIGHT, origin=None):
-    """Paste one sampled frame of the banner onto `bg`, exactly as banner.py
-    composites it: card, ring, two lines of copy, draining rule."""
+def draw_banner(bg, t, fonts, scale, title, detail, field=PURPLE,
+                field_line=PURPLE_LIGHT, origin=None, motion=None,
+                frames_mod=None):
+    """Paste the banner at `t` onto `bg`, exactly as banner.py composites it:
+    card, mark, two lines of copy, draining rule.
+
+    Takes the time rather than a sampled frame so the card and the mark can
+    never come from different instants - the mark is indexed by t now, not
+    derived from frame.ring.
+
+    `motion` and `frames` pick the timeline, the same pair banner.py keeps in
+    its TIMELINE table: the save banner winks, the error banner shuts both eyes
+    and shakes. Defaults to the save banner.
+    """
+    motion = motion or M
+    frames_mod = frames_mod or F
+    frame = motion.sample(t)
     px = lambda v: int(round(v * scale))
     W, H = bg.size
     w, h = max(1, px(frame.w)), max(1, px(frame.h))
@@ -133,8 +155,8 @@ def draw_banner(bg, frame, fonts, scale, title, detail, field=PURPLE,
 
     even = max(4, min(76, int(round(frame.h / 2.0)) * 2))
     r = 2 + (12 - 2) * (even - 4) / 72
-    card = F.card(px(M.CARD_W), px(even), px(r), px(4),
-                  1.0 if even <= 6 else 0.0, bg=field, line=field_line)
+    card = card_image(px(M.CARD_W), px(even), px(r), px(4),
+                      1.0 if even <= 6 else 0.0, bg=field, line=field_line)
     if card.width != w:
         card = card.resize((w, card.height), Image.BILINEAR)
     if card.height != h:
@@ -146,15 +168,16 @@ def draw_banner(bg, frame, fonts, scale, title, detail, field=PURPLE,
 
     if frame.copy > 0.001:
         rise = px(COPY_RISE) * (1.0 - frame.copy)
-        index = int(round(frame.ring * F.RING_FRAMES))
-        if index > 0:
-            step = round(max(0.0, min(1.0, frame.copy)) * 8) / 8.0
-            ring = F.ring_frame(px(RING), index / F.RING_FRAMES,
-                                color=CARD_CREAM, bg=field).convert("RGB")
-            if step < 1.0:
-                ring = Image.blend(Image.new("RGB", ring.size, rgb(field)), ring, step)
-            layer.paste(ring, (px(PAD_X), int(px(RING_CY - RING / 2) + rise)))
-        tx = px(PAD_X + RING + GAP)
+        # The mark is posed, not just partly drawn, so it comes from the same
+        # SVG the shipped flipbook is baked from rather than from an arc.
+        step = round(max(0.0, min(1.0, frame.copy)) * 8) / 8.0
+        # No `art`: the mark is brand cream, not the card's warmer CARD_CREAM,
+        # which is the title's colour. This matches the reference GIF.
+        mark = frames_mod.render_one(t, px=px(MARK), bg=field).convert("RGB")
+        if step < 1.0:
+            mark = Image.blend(Image.new("RGB", mark.size, rgb(field)), mark, step)
+        layer.paste(mark, (px(PAD_X), int(px(MARK_CY - MARK / 2) + rise)))
+        tx = px(TEXT_X)
         ft = fonts.load("med", px(15), weight=500)
         fd = fonts.load("mono", px(12))
         d.text((tx, px(TITLE_CY) + rise), title, font=ft,
@@ -187,18 +210,23 @@ def draw_banner(bg, frame, fonts, scale, title, detail, field=PURPLE,
 # ----------------------------------------------------------------- GIF -----
 def banner_gif(out, fonts, title="Nabbed", detail="5:00 · 1.2 GB",
                scale=2.0, fps=25, css=(452, 176), field=PURPLE,
-               field_line=PURPLE_LIGHT, tail_ms=520):
+               field_line=PURPLE_LIGHT, tail_ms=520,
+               motion=None, frames_mod=None):
+    # `frames_mod` rather than `frames`: the list of rendered images below
+    # already owns that name.
+    motion = motion or M
     # Flat shell, no bloom: a gradient survives a 128-colour GIF palette as
     # visible banding, and the banner is the subject anyway.
     w, h = int(css[0] * scale), int(css[1] * scale)
     bg = Image.new("RGB", (w, h), rgb(SHELL))
     frames, step = [], 1000.0 / fps
     t = 0.0
-    while t < M.TOTAL_MS:
-        frames.append(draw_banner(bg, M.sample(t), fonts, scale, title, detail,
+    while t < motion.TOTAL_MS:
+        frames.append(draw_banner(bg, t, fonts, scale, title, detail,
                                   field, field_line,
                                   origin=(w - int(MARGIN_RIGHT * scale) - int(M.CARD_W * scale),
-                                          int(38 * scale))))
+                                          int(38 * scale)),
+                                  motion=motion, frames_mod=frames_mod))
         t += step
     hold = int(tail_ms / step)
     frames += [bg] * max(1, hold)
@@ -248,11 +276,12 @@ def hero(out, fonts, w=1280, h=440, scale=2):
     d.text((x0 + int(2 * scale) + cw // 2, chip_y + ch // 2), label,
            font=f_key, fill=rgb(CARD_CREAM), anchor="mm")
 
-    # the banner at rest, bottom-right
-    rest = M.sample(2000)
+    # The banner at rest, bottom-right. 1200 ms, not 2000: that is the resting
+    # instant nabd_mark_frames bakes as frame 0 - assembled, level, eyes open.
+    # 2000 now lands mid-wink, with the head turned and one eye shut.
     card_x = W - int(96 * scale) - int(M.CARD_W * scale)
     card_y = H - int(110 * scale) - int(M.CARD_H * scale)
-    img = draw_banner(img, rest, fonts, scale, "Nabbed", "5:00 · 1.2 GB",
+    img = draw_banner(img, 1200.0, fonts, scale, "Nabbed", "5:00 · 1.2 GB",
                       origin=(card_x, card_y))
     img = img.resize((w, h), Image.LANCZOS)
     img.save(out)
@@ -386,7 +415,7 @@ def logos(out, fonts, w=1280, h=300, scale=2):
         t = tile.resize((s_(size), s_(size)), Image.LANCZOS)
         img.paste(t, (s_(688 + sum((150, 96, 64, 40)[:i]) + i * 26),
                       s_(56 + (150 - size) // 2)), t)
-    d.text((s_(688), s_(226)), "APP TILE — 22.5% RADIUS, 58% RING, HOLDS TO 16 PX",
+    d.text((s_(688), s_(226)), "APP TILE — 22.5% RADIUS, HOLDS TO 16 PX",
            font=f_cap, fill=rgb(PURPLE_LIGHT), anchor="la")
     img.resize((w, h), Image.LANCZOS).save(out)
     return out
@@ -407,9 +436,12 @@ def main():
     palette(out / "palette.png", fonts)
     logos(out / "logos.png", fonts)
     banner_gif(out / "banner.gif", fonts)
-    banner_gif(out / "banner-fail.gif", fonts, title="Nab failed",
-               detail="display lost — see log", field=DANGER,
-               field_line="#D2665C")
+    # The failure GIF is the ERROR timeline on the error ground, not the save
+    # banner tinted red: it shuts both eyes and shakes its head. The field is
+    # #8E3229 rather than --danger for contrast - see docs/error-banner.
+    banner_gif(out / "banner-fail.gif", fonts, title="Capture Lost",
+               detail="Use Borderless Windowed", field=ERR.FIELD,
+               field_line=ERR.FIELD_EDGE, motion=ERR, frames_mod=FE)
     for f in sorted(out.iterdir()):
         print(f"  {f.name:22s} {f.stat().st_size/1024:8.0f} KB")
 

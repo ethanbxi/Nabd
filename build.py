@@ -91,13 +91,45 @@ def gather():
 
     # The save banner is drawn entirely from pre-rendered frames. Rendering
     # them at launch would cost exactly what onedir was chosen to save, so they
-    # are built here. Regenerated only when missing - the assertion that frame
-    # 16 is the logo runs with them.
+    # are built here.
+    #
+    # All three checks run on every build, not only when the frames are
+    # missing. They encode things that have already gone wrong once: the mark
+    # changing outside a declared motion window, the eyes drifting off the
+    # ring's close, a sound cue left without a beat - and, the one only a
+    # rasterised check can catch, svglib silently dropping the very channel
+    # the timeline is animating (docs/banner/BANNER.md section 5a).
+    import nabd_banner
+    import nabd_banner_error
+    import nabd_mark_frames
+    import nabd_mark_frames_error
+    try:
+        nabd_banner.assert_invariants()
+        nabd_mark_frames.assert_invariants()
+        nabd_mark_frames.assert_raster()
+        nabd_banner_error.assert_invariants()
+        nabd_mark_frames_error.assert_invariants()
+        # The claim the error banner rests on: one product, two outcomes. Its
+        # entry and exit must be the same pictures as the save banner's.
+        nabd_mark_frames_error.assert_shared_with_save()
+        nabd_mark_frames_error.assert_raster()
+    except AssertionError as exc:
+        print(f"  motion      FAILED: {exc}")
+        return False
+
+    # A retimed beat leaves a frame set that is stale but present, which is
+    # exactly the case a "regenerate only when missing" check waves through.
+    # Counting them against each timeline's own frame count catches it - and
+    # the two counts differ, so the failure set cannot be the save set.
     frames = APP / "assets" / "banner"
-    if not list(frames.glob("*/ring_16.png")):
+    want = nabd_mark_frames.FRAME_COUNT
+    want_err = nabd_mark_frames_error.FRAME_COUNT
+    if (len(list((frames / "1x").glob("mark_*.png"))) != want
+            or len(list((frames / "1x-fail").glob("mark_*.png"))) != want_err):
         import make_banner_assets
         make_banner_assets.main(str(frames))
-    print(f"  banner art  {len(list(frames.glob('*/*.png')))} frames")
+    print(f"  banner art  {len(list(frames.glob('*/*.png')))} frames, "
+          f"{want} save + {want_err} error poses per scale")
 
     # The capture sound, checked rather than merely counted. Its length has to
     # equal the banner's TOTAL_MS to the sample - async playback dies with the
@@ -105,7 +137,6 @@ def gather():
     # the exit unscored - and winsound has no volume control, so the mastering
     # level IS the playback level. Both are cheap to break by re-rendering and
     # neither shows up until someone hears it.
-    import nabd_banner
     import nabd_sound
     if nabd_sound.DURATION_MS != nabd_banner.TOTAL_MS:
         print(f"  sound       FAILED: nabd_sound.DURATION_MS is "

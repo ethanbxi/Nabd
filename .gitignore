@@ -51,3 +51,13 @@ posters/
 
 # The handoff zips, unpacked into docs/ already.
 Claude outputs/
+
+# Local archive of files replaced during the brand/banner/tray work, kept so a
+# swap can be undone without git history. 73 MB of it is an old installer, and
+# none of it is source anyone cloning this needs.
+_superseded/
+
+# Private working notes, not documentation. Carries machine-specific paths and
+# an account-level to-do list; it is for moving between machines, not for
+# anyone cloning this.
+HANDOFF.md

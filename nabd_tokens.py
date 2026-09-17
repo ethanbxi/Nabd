@@ -91,6 +91,26 @@ THUMB_SRC_W    = 420
 FOOTER_H       = 60
 FOCUS_W        = 2
 
+# -- the save banner's mark ------------------------------------------------
+# Not the panel, but it lives here because two modules have to agree on it:
+# make_banner_assets.py BAKES the flipbook at this size and banner.py BLITS it
+# at this size. A Tk canvas image is drawn at its native size, so if the two
+# drift the mark simply comes out wrong - no error, no blur, just wrong.
+#
+# These are the approved preview's own numbers. It laid out in a 252-wide card
+# and the canonical one is 308, so everything scales by K; the same three
+# constants drive docs/banner/make_reference_gif.py, which is what the
+# reference GIF was rendered from.
+#
+# BANNER_MARK is the POSED BOX (nabd_mark.ANIM), not the ink. The artwork is
+# only 67% of that box - the rest is the room the tilt needs to swing the horn
+# tips - so a box sized to look right as a number renders a mark about half
+# the size it should be. 44 units here is ~36 px of visible mark.
+_BANNER_K       = 308.0 / 252.0     # preview units -> canonical card
+BANNER_MARK     = 44.0 * _BANNER_K  # 53.8  posed box
+BANNER_MARK_X   = 8.0 * _BANNER_K   #  9.8  its left edge (15 pad - 7 margin)
+BANNER_TEXT_X   = 57.0 * _BANNER_K  # 69.7  15 pad + 30 ink + 12 gap
+
 # -- dpi -------------------------------------------------------------------
 _scale = 1.0
 

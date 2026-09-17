@@ -1,27 +1,35 @@
 """
-Nab'd brand system: palette, type scale, and the logo drawn from its geometry.
+Nab'd brand system: palette, type scale, and the logo as supplied artwork.
 
-The mark and wordmark are reproduced from the measurements in the brand
-guidelines rather than by rasterising the SVGs, so they stay crisp at tray sizes
-and need no image dependencies. brand/ holds the reference assets this is
-measured against.
+Everything here now resolves to the files in brand/, rasterised into
+brand/render/*.png by render_assets.py. Nothing in this module redraws the
+mark or the wordmark from measurements.
 
-Geometry, read off nabd-mark-cream.svg and nabd-wordmark-cream.svg:
+That is a change, and it is the point of it. The mark used to be transcribed
+into arc geometry so it could be drawn on a Tk canvas at any size; the brand
+overhaul replaced it with a horned head whose horns and eyes are bezier paths,
+and a transcription of that would be a second, drifting copy of the artwork -
+exactly what OVERHAUL.md section 8 warns about. The numbers below are read from
+the artwork's own boxes (see nabd_mark.py, which holds the paths) and are used
+only to place and scale it, never to draw it.
 
-  Mark        100u box, centre (50,50), radius 34u, stroke 14u
-              gap spans 30deg to 95deg - 65deg wide, centred on 1 o'clock
-              lit segment 95deg to 160deg, the 65deg counter-clockwise of it
-              main arc 160deg through 30deg, terminals butt, never rounded
-  Wordmark    stroke 13u, round caps, x-height 48u, ascender 86u
+  Mark        artwork box 268u inside the tile's 384u frame
+  Tile        22.5% corner radius; the mark sits centred, 3u above centre
+  Wordmark    box 466.6 x 152.5u, ascender-to-baseline 129u, stroke 19.5u
 
-The wordmark and the app tile are shown from brand/render/*.png, rasterised
-from the supplied SVGs by render_assets.py. The geometry below still drives the
-animated mark - a partial stroke cannot come from a bitmap - and stands in if
-the renders are missing.
+THE HORN RULE (OVERHAUL.md section 2). The horns appear exactly once, on
+whichever element is alone. Every lockup this module composes puts the mark
+next to the type, so every one of them asks for the PLAIN wordmark - which is
+why wordmark_image() defaults to plain and horned is opt-in.
 """
 
 import sys
 from pathlib import Path
+
+# The paths and the artwork's own measurements. stdlib-only, so this adds no
+# runtime dependency - which is the constraint the whole brand system is built
+# under.
+import nabd_mark as _art
 
 # -- palette ---------------------------------------------------------------
 
@@ -81,164 +89,68 @@ def weight_font(weight):
     return font(_WEIGHTS.get(weight, "Outfit"))
 
 
-# -- the mark --------------------------------------------------------------
+# -- the artwork's measurements --------------------------------------------
 
-CENTRE = 50.0
-RADIUS = 34.0
-STROKE = 14.0
-BOX = 82.0            # visible extent: (RADIUS + STROKE/2) * 2
+# The tile's frame and the mark's box within it, straight off nabd_mark.
+TILE_UNITS = _art.FULL[2]                       # 384
+_MARK_X, _MARK_Y, MARK_UNITS = _art.TIGHT[0], _art.TIGHT[1], _art.TIGHT[2]
 
-# The published artwork is two path elements, but the second ends exactly where
-# the first begins (160deg), so the mark is a single unbroken stroke with one
-# gap. Drawing it as two arcs leaves a seam at the join; drawing it as one also
-# makes the stroke order obvious when it is animated.
-STROKE_START, STROKE_EXTENT = 95.0, 295.0   # Tk angles: ccw from 3 o'clock
-GAP_START, GAP_EXTENT = 30.0, 65.0          # the bite, centred on 1 o'clock
+TILE_RADIUS = 86.4 / TILE_UNITS                 # 0.225, off the tile path
+MARK_RATIO = MARK_UNITS / TILE_UNITS            # 0.698 of the tile
+# The mark is centred horizontally but sits 3u above centre - the horns need
+# the headroom. Placing it dead centre drops the head and reads as a slump.
+MARK_OFFSET = (_MARK_X / TILE_UNITS, _MARK_Y / TILE_UNITS)
 
-MAIN_START, MAIN_EXTENT = 160.0, 230.0      # the two published sub-paths,
-LIT_START, LIT_EXTENT = 95.0, 65.0          # kept for reference
+# Wordmark, from nabd_mark.WORD_BOX ('-2 -2 466.6 152.5').
+_WB = [float(v) for v in _art.WORD_BOX.split()]
+WORD_BOX_W, WORD_BOX_H = _WB[2], _WB[3]
+WORD_STROKE = _art.WORD_SW                      # 19.5
+# Ascender to baseline: the stems run y 9.75 -> 138.75 (OVERHAUL.md section 1).
+WORD_HEIGHT = 129.0
+# The rendered PNG carries the stroke's padding, so a request for an ascender
+# height scales by the full box.
+_WORD_BOX_RATIO = WORD_BOX_H / WORD_HEIGHT
 
-
-def draw_mark(canvas, x, y, box, colour, stroke_scale=1.0, progress=1.0,
-              tags=()):
-    """Draw the ring with its visible extent filling `box` pixels at (x, y).
-
-    `progress` below 1 draws the mark part-way along its own stroke: the main
-    arc grows counter-clockwise from 160deg toward the gap, and the lit segment
-    lands last. Nothing is ever rotated - the gap stays at 1 o'clock, which is
-    what separates a ring buffer from a loading spinner.
-    """
-    s = box / BOX
-    cx, cy = x + box / 2, y + box / 2
-    r = RADIUS * s
-    width = max(1, round(STROKE * s * stroke_scale))
-    bounds = (cx - r, cy - r, cx + r, cy + r)
-
-    extent = STROKE_EXTENT * max(0.0, min(1.0, progress))
-    if extent > 0.5:
-        canvas.create_arc(*bounds, start=STROKE_START, extent=extent,
-                          style="arc", outline=colour, width=width, tags=tags)
-
-
-# -- the wordmark ----------------------------------------------------------
-
-WORD_STROKE = 13.0
-WORD_TOP, WORD_BASE = 12.0, 98.0          # ascender to baseline
-WORD_HEIGHT = WORD_BASE - WORD_TOP        # 86u
-WORD_LEFT, WORD_RIGHT = 8.0, 306.0
-
-# n, a, b, apostrophe, d - the apostrophe is a clipped ascender stem, and the
-# d sits 16u further right than it did before it was added.
-_STEMS = ((8, 98, 8, 74), (56, 74, 56, 98), (134, 50, 134, 98),
-          (164, 12, 164, 98), (232, 12, 232, 36), (306, 12, 306, 98))
-_BOWLS = (110, 188, 282)                  # centres, y=74, r=24
-_ARCH = (32, 74, 24)                      # n's shoulder: centre, radius
-
-
-def draw_wordmark(canvas, x, y, height, colour, tags=()):
-    """Draw 'nabd' with its ascender-to-baseline span equal to `height`.
-
-    Never substitute type here: the wordmark is artwork, and a typed stand-in
-    reads as a knock-off.
-    """
-    s = height / WORD_HEIGHT
-    width = max(1, round(WORD_STROKE * s))
-
-    def px(ux, uy):
-        return x + (ux - WORD_LEFT) * s, y + (uy - WORD_TOP) * s
-
-    for x1, y1, x2, y2 in _STEMS:
-        a, b = px(x1, y1), px(x2, y2)
-        canvas.create_line(*a, *b, fill=colour, width=width,
-                           capstyle="round", tags=tags)
-    for cx in _BOWLS:
-        left, top = px(cx - 24, 74 - 24)
-        right, bottom = px(cx + 24, 74 + 24)
-        canvas.create_oval(left, top, right, bottom, outline=colour,
-                           width=width, tags=tags)
-    ax, ay, ar = _ARCH
-    left, top = px(ax - ar, ay - ar)
-    right, bottom = px(ax + ar, ay + ar)
-    canvas.create_arc(left, top, right, bottom, start=0, extent=180,
-                      style="arc", outline=colour, width=width, tags=tags)
-
-
-def wordmark_width(height):
-    s = height / WORD_HEIGHT
-    return (WORD_RIGHT - WORD_LEFT + WORD_STROKE) * s
-
-
-# -- the lockup ------------------------------------------------------------
-
-# Proportions from nabd-lockup-cream.svg: the wordmark sits at translate(120,
-# 10.8) scale(0.712) inside the mark's 100u coordinate system.
-LOCK_WORD_X, LOCK_WORD_Y, LOCK_WORD_SCALE = 120.0, 10.8, 0.712
-LOCK_LEFT, LOCK_TOP = 9.0, 9.0
-LOCK_WIDTH = 334.0
-LOCK_HEIGHT = 82.0
-
-
-def draw_lockup(canvas, x, y, height, colour, tags=()):
-    """Mark plus wordmark, at the spacing the guidelines specify."""
-    s = height / LOCK_HEIGHT
-    draw_mark(canvas, x + (CENTRE - RADIUS - STROKE / 2 - LOCK_LEFT) * s,
-              y + (CENTRE - RADIUS - STROKE / 2 - LOCK_TOP) * s,
-              BOX * s, colour, tags=tags)
-
-    word_height = WORD_HEIGHT * LOCK_WORD_SCALE * s
-    wx = x + (LOCK_WORD_X + LOCK_WORD_SCALE * WORD_LEFT - LOCK_LEFT) * s
-    wy = y + (LOCK_WORD_Y + LOCK_WORD_SCALE * WORD_TOP - LOCK_TOP) * s
-    draw_wordmark(canvas, wx, wy, word_height, colour, tags=tags)
-
-
-def lockup_width(height):
-    return LOCK_WIDTH * (height / LOCK_HEIGHT)
-
+# The primary lockup, from nabd-lockup-cream.svg's viewBox, and the stacked
+# one, from nabd-stacked-cream.svg's. Both pair the mark with the PLAIN
+# wordmark, as supplied.
+LOCK_WIDTH, LOCK_HEIGHT = 258.4, 116.0
+STACK_WIDTH, STACK_HEIGHT = 138.8, 171.0
 
 # Minimum sizes from the guidelines, in screen pixels at 1x.
-MIN_LOCKUP_WIDTH = 120     # below this the gap in the ring closes up
+MIN_LOCKUP_WIDTH = 120     # below this the bite in the ring closes up
 MIN_TILE = 16              # holds at tray size
-MIN_MARK = 20              # the unlidded ring needs more room than the tile
+MIN_MARK = 20              # the unlidded mark needs more room than the tile
 
 # Smallest lockup height that still clears the minimum width.
 MIN_LOCKUP_HEIGHT = int(-(-MIN_LOCKUP_WIDTH * LOCK_HEIGHT // LOCK_WIDTH))
-
 
 
 # -- tile lockup -----------------------------------------------------------
 
 # The "tile on shell" treatment: the purple tile keeps the brand at full
 # strength on a dark ground, where bare purple linework would fall under the
-# contrast floor. Proportions taken from the supplied artwork - the wordmark is
-# half the tile's height, set a third of a tile away, optically centred on it.
-TILE_RADIUS = 0.225        # corner radius as a fraction of the tile
-TILE_RING = 0.58           # ring diameter as a fraction of the tile
-# Measured off the supplied lockup artwork: with a 143px tile the wordmark is
-# 216px wide and sits 28px away, so its ascender height is 0.42 of the tile and
-# the gap is 0.20 of it.
+# contrast floor. The wordmark is a little under half the tile's height, set a
+# fifth of a tile away, optically centred on it.
+#
+# These two ratios survive the overhaul unchanged, and deliberately: the new
+# wordmark's width-to-ascender is 3.617 against the old 3.616, so the header
+# these drive lands within a pixel of where it always did.
 TILE_WORD_RATIO = 0.42
 TILE_GAP_RATIO = 0.20
 
-
-def draw_tile(canvas, x, y, size, field=PURPLE, ring=CREAM, tags=()):
-    """Purple tile with the cream ring, drawn natively (no image needed)."""
-    r = size * TILE_RADIUS
-    pts = [x + r, y, x + size - r, y, x + size, y, x + size, y + r,
-           x + size, y + size - r, x + size, y + size, x + size - r, y + size,
-           x + r, y + size, x, y + size, x, y + size - r, x, y + r, x, y]
-    canvas.create_polygon(pts, smooth=True, fill=field, outline=field,
-                          tags=tags)
-    inset = size * (1 - TILE_RING) / 2
-    draw_mark(canvas, x + inset, y + inset, size * TILE_RING, ring, tags=tags)
+_TILE_LOCKUP_RATIO = (1 + TILE_GAP_RATIO) + TILE_WORD_RATIO * (
+    WORD_BOX_W / WORD_HEIGHT)
+MIN_TILE_LOCKUP = int(-(-MIN_LOCKUP_WIDTH // _TILE_LOCKUP_RATIO))
 
 
-def draw_tile_lockup(canvas, x, y, tile, field=PURPLE, ring=CREAM,
-                     word=CREAM, tags=()):
-    """Tile plus wordmark, as the supplied lockup artwork sets it."""
-    draw_tile(canvas, x, y, tile, field, ring, tags)
-    word_h = tile * TILE_WORD_RATIO
-    wx = x + tile + tile * TILE_GAP_RATIO
-    draw_wordmark(canvas, wx, y + (tile - word_h) / 2, word_h, word, tags)
+def wordmark_width(height):
+    """Width of the wordmark whose ascender-to-baseline span is `height`."""
+    return WORD_BOX_W * (height / WORD_HEIGHT)
+
+
+def lockup_width(height):
+    return LOCK_WIDTH * (height / LOCK_HEIGHT)
 
 
 def tile_lockup_width(tile):
@@ -246,39 +158,11 @@ def tile_lockup_width(tile):
         tile * TILE_WORD_RATIO)
 
 
-# The tile lockup's width is a fixed multiple of the tile, so the guidelines'
-# 120px minimum converts straight into a smallest usable tile.
-_TILE_LOCKUP_RATIO = (1 + TILE_GAP_RATIO) + TILE_WORD_RATIO * (
-    (WORD_RIGHT - WORD_LEFT + WORD_STROKE) / WORD_HEIGHT)
-MIN_TILE_LOCKUP = int(-(-MIN_LOCKUP_WIDTH // _TILE_LOCKUP_RATIO))
+# -- loading the rendered artwork ------------------------------------------
 
-
-# -- raster output for icons ----------------------------------------------
-
-def _pil_angles(tk_start, tk_extent):
-    """Tk measures counter-clockwise from 3 o'clock; PIL measures clockwise."""
-    return -(tk_start + tk_extent), -tk_start
-
-
-def ring_image(size, colour, stroke_scale=1.0, progress=1.0, supersample=8):
-    """The mark alone on transparency, antialiased.
-
-    `progress` below 1 stops the stroke part-way, for the banner's draw-on.
-    """
-    from PIL import Image, ImageDraw
-    big = size * supersample
-    img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    s = big / BOX
-    cx = cy = big / 2
-    r = RADIUS * s
-    width = max(1, round(STROKE * s * stroke_scale))
-    box = (cx - r, cy - r, cx + r, cy + r)
-    extent = STROKE_EXTENT * max(0.0, min(1.0, progress))
-    if extent > 0.5:
-        a, b = _pil_angles(STROKE_START, extent)
-        d.arc(box, start=a, end=b, fill=colour, width=width)
-    return img.resize((size, size), Image.LANCZOS)
+def _rgb(value):
+    value = value.lstrip("#")
+    return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
 
 
 def _asset_root():
@@ -294,6 +178,7 @@ def _asset_root():
 
 RENDER_DIR = _asset_root() / "brand" / "render"
 _asset_cache = {}
+_warned = set()
 
 
 def asset(name):
@@ -315,6 +200,33 @@ def asset(name):
     return img
 
 
+def _require(name):
+    """The artwork, or a blank of the right shape plus one warning.
+
+    There is deliberately no geometry fallback any more. The old one drew the
+    retired mark - a ring with the bite at 1 o'clock, no horns, no eyes - which
+    meant a missing render silently shipped last year's logo. A hole is
+    obvious; a plausible wrong mark is not.
+
+    In practice this never fires in a shipped build: nabd.spec bundles
+    brand/render/*.png and build.py refuses to freeze without them. It fires
+    when someone runs from source before render_assets.py.
+    """
+    img = asset(name)
+    if img is None and name not in _warned:
+        _warned.add(name)
+        # Frozen with console=False there is no stderr to write to, and an
+        # AttributeError here would take down the tray icon over a missing
+        # PNG. The warning is for someone running from source; the shipped
+        # build cannot reach it.
+        try:
+            sys.stderr.write(
+                f"brand: {name}.png is missing - run render_assets.py\n")
+        except Exception:
+            pass
+    return img
+
+
 def _scaled(img, height):
     from PIL import Image
     if img.height == height:
@@ -323,64 +235,147 @@ def _scaled(img, height):
     return img.resize((width, max(1, height)), Image.LANCZOS)
 
 
-def wordmark_image(height, colour=CREAM):
+def _tinted(img, colour):
+    """Recolour flat artwork, keeping its antialiasing.
+
+    The mark and the wordmark are each a single flat colour over an alpha
+    channel, so replacing the colour and keeping the alpha is exact - not an
+    approximation of a retint.
+    """
+    from PIL import Image
+    out = Image.new("RGBA", img.size, _rgb(colour) + (255,))
+    out.putalpha(img.getchannel("A"))
+    return out
+
+
+# -- the mark --------------------------------------------------------------
+
+def mark_image(size, colour=CREAM):
+    """The mark alone on transparency, from the supplied artwork.
+
+    Square: the artwork's box is 268u on both axes, and the pose the banner
+    plays is baked separately by nabd_mark_frames.
+    """
+    from PIL import Image
+    size = max(1, int(size))
+    name = "nabd-mark-ink" if colour == INK else "nabd-mark-cream"
+    art = _require(name)
+    if art is None:
+        return Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    art = art.resize((size, size), Image.LANCZOS)
+    if colour not in (CREAM, INK):
+        art = _tinted(art, colour)
+    return art
+
+
+# The mark is no longer a ring, but make_wizard_art and _test/render_brand.py
+# reach for it by the old name.
+ring_image = mark_image
+
+
+# -- the wordmark ----------------------------------------------------------
+
+def wordmark_image(height, colour=CREAM, horned=False):
     """The wordmark, from the supplied artwork.
 
     `height` is the ascender-to-baseline span, matching the units the rest of
-    this module speaks in; the rendered PNG carries half a stroke of padding on
-    each side, so it is scaled by its full box.
+    this module speaks in; the rendered PNG carries the stroke's padding, so it
+    is scaled by its full box.
+
+    `horned` follows the horn rule: leave it False whenever the mark is also on
+    screen, which is every lockup this module composes. Set it only for the
+    wordmark standing alone - a README title, an installer header.
     """
-    name = "nabd-wordmark-ink" if colour == INK else "nabd-wordmark-cream"
-    art = asset(name)
+    from PIL import Image
+    variant = "horned" if horned else "plain"
+    tone = "ink" if colour == INK else "cream"
+    art = _require(f"nabd-wordmark-{variant}-{tone}")
+    want = max(1, int(round(height * _WORD_BOX_RATIO)))
     if art is None:
-        return _wordmark_fallback(height, colour)
-    box = (WORD_HEIGHT + WORD_STROKE) / WORD_HEIGHT
-    return _scaled(art, max(1, int(round(height * box))))
+        return Image.new("RGBA", (max(1, int(want * WORD_BOX_W / WORD_BOX_H)),
+                                  want), (0, 0, 0, 0))
+    art = _scaled(art, want)
+    if colour not in (CREAM, INK):
+        art = _tinted(art, colour)
+    return art
 
 
-def _wordmark_fallback(height, colour, supersample=8):
-    """Drawn from geometry, used only when the PNGs are missing."""
+# -- the tile --------------------------------------------------------------
+
+def tile_image(size, field=PURPLE, ring=CREAM, supersample=8):
+    """The app tile: purple field, 22.5% corner radius, the mark on top.
+
+    At brand colours this IS nabd-app-tile-512.svg, resized - the supplied
+    artwork, not a reconstruction. The overhaul's tile is a flat SVG, so the
+    nested-viewBox mis-placement that used to force this to compose the tile by
+    hand no longer applies.
+
+    A recoloured tile - the paused tray icon - still has to be composed, since
+    a PNG cannot be retinted field and mark independently.
+    """
     from PIL import Image, ImageDraw
-    span_x = WORD_RIGHT - WORD_LEFT + WORD_STROKE
-    span_y = WORD_HEIGHT + WORD_STROKE
-    out_h = max(1, int(round(height * span_y / WORD_HEIGHT)))
-    out_w = max(1, int(round(out_h * span_x / span_y)))
+    size = max(1, int(size))
+    if field == PURPLE and ring == CREAM:
+        art = _require("nabd-app-tile-512")
+        if art is not None:
+            return art.resize((size, size), Image.LANCZOS)
 
-    w, h = out_w * supersample, out_h * supersample
-    s = h / span_y
-    pad = WORD_STROKE / 2
-    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    stroke = max(1, round(WORD_STROKE * s))
-    cap = stroke / 2
+    big = size * supersample
+    img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    ImageDraw.Draw(img).rounded_rectangle(
+        (0, 0, big - 1, big - 1), radius=big * TILE_RADIUS, fill=field)
+    extent = int(round(big * MARK_RATIO))
+    glyph = mark_image(extent, ring)
+    img.alpha_composite(glyph, (int(round(big * MARK_OFFSET[0])),
+                                int(round(big * MARK_OFFSET[1]))))
+    return img.resize((size, size), Image.LANCZOS)
 
-    def px(ux, uy):
-        return ((ux - WORD_LEFT + pad) * s, (uy - WORD_TOP + pad) * s)
 
-    for x1, y1, x2, y2 in _STEMS:
-        a, b = px(x1, y1), px(x2, y2)
-        d.line([a, b], fill=colour, width=stroke)
-        # PIL has no round caps; a disc at each end supplies them.
-        for point in (a, b):
-            d.ellipse([point[0] - cap, point[1] - cap,
-                       point[0] + cap, point[1] + cap], fill=colour)
-    for cx in _BOWLS:
-        x0, y0 = px(cx - 24, 74 - 24)
-        x1, y1 = px(cx + 24, 74 + 24)
-        d.ellipse([x0, y0, x1, y1], outline=colour, width=stroke)
-    ax, ay, ar = _ARCH
-    x0, y0 = px(ax - ar, ay - ar)
-    x1, y1 = px(ax + ar, ay + ar)
-    d.arc([x0, y0, x1, y1], start=180, end=360, fill=colour, width=stroke)
+# -- lockups ---------------------------------------------------------------
 
-    return img.resize((out_w, out_h), Image.LANCZOS)
+def lockup_image(height, colour=CREAM):
+    """The primary lockup - mark beside the plain wordmark - as supplied.
+
+    `height` is the artwork's full box, not the wordmark's ascender.
+    """
+    from PIL import Image
+    name = "nabd-lockup-ink" if colour == INK else "nabd-lockup-cream"
+    art = _require(name)
+    height = max(1, int(height))
+    if art is None:
+        return Image.new("RGBA",
+                         (max(1, int(height * LOCK_WIDTH / LOCK_HEIGHT)),
+                          height), (0, 0, 0, 0))
+    art = _scaled(art, height)
+    if colour not in (CREAM, INK):
+        art = _tinted(art, colour)
+    return art
+
+
+def stacked_image(height, colour=CREAM):
+    """The stacked lockup - mark over the plain wordmark - as supplied.
+
+    Used below the primary lockup's 120px minimum width, and for the installer
+    wizard panel, which is a tall column.
+    """
+    from PIL import Image
+    name = "nabd-stacked-ink" if colour == INK else "nabd-stacked-cream"
+    art = _require(name)
+    height = max(1, int(height))
+    if art is None:
+        return Image.new("RGBA",
+                         (max(1, int(height * STACK_WIDTH / STACK_HEIGHT)),
+                          height), (0, 0, 0, 0))
+    art = _scaled(art, height)
+    if colour not in (CREAM, INK):
+        art = _tinted(art, colour)
+    return art
 
 
 def tile_lockup_image(tile, field=PURPLE, ring=CREAM, word=CREAM):
     """Tile plus wordmark as one antialiased image, for the panel header.
 
-    Refuses to go under the lockup's minimum width: below it the strokes stop
-    holding together, which is exactly what the 120px rule is protecting.
+    The wordmark is the plain one: the mark is present, inside the tile.
     """
     from PIL import Image
     tile = int(tile)
@@ -391,32 +386,3 @@ def tile_lockup_image(tile, field=PURPLE, ring=CREAM, word=CREAM):
     img.alpha_composite(tile_image(tile, field, ring), (0, 0))
     img.alpha_composite(glyph, (tile + gap, (img.height - glyph.height) // 2))
     return img
-
-
-def tile_image(size, field=PURPLE, ring=CREAM, supersample=8):
-    """The app tile: purple field, 22.5% corner radius, ring at 58%.
-
-    Uses the supplied artwork at brand colours; only a recoloured tile (the
-    paused tray icon) is drawn, since the PNG cannot be retinted.
-    """
-    from PIL import Image, ImageDraw
-    big = size * supersample
-    img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle((0, 0, big - 1, big - 1), radius=big * TILE_RADIUS,
-                        fill=field)
-
-    # The tile is composed here rather than taken from nabd-app-tile-512.svg:
-    # that file nests an inner <svg> with its own viewBox, which the rasteriser
-    # mis-places - the ring came out off-centre with a 7% stroke instead of 8%.
-    # The ring's visible box is BOX of the inner 100u frame, and that frame is
-    # TILE_RING of the tile.
-    extent = int(round(big * TILE_RING * BOX / 100.0))
-    art = asset("nabd-mark-ink" if ring == INK else "nabd-mark-cream")
-    if art is not None and ring in (CREAM, INK):
-        glyph = art.resize((extent, extent), Image.LANCZOS)
-    else:   # a recoloured tile (the paused tray icon) has to be drawn
-        glyph = ring_image(extent, ring, supersample=2)
-    pos = (big - extent) // 2
-    img.alpha_composite(glyph, (pos, pos))
-    return img.resize((size, size), Image.LANCZOS)

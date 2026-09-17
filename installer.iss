@@ -8,7 +8,7 @@
 
 #define AppName "Nab'd"
 #define AppShortName "Nabd"
-#define AppVersion "2.2.0"
+#define AppVersion "2.3.6"
 #define AppPublisher "Nab'd"
 #define AppExe "Nabd.exe"
 
@@ -40,6 +40,16 @@ WizardSmallImageFile=installer\wizardsmall-*.bmp
 ; all-users override offered - it would only add a dialog before the wizard,
 ; and Nab'd has nothing to put outside the user profile.
 PrivilegesRequired=lowest
+; The name nabd.claim_single_instance() creates: APP_NAME + ".Instance",
+; unprefixed, so it lives in the session namespace - which is where Inno looks
+; and where a per-user install runs. Without this, installing over a running
+; nab'd hits files-in-use and Windows defers them to a reboot, leaving a
+; half-updated install.
+;
+; It DETECTS and asks; it does not close anything itself. The updater's silent
+; handoff is why _quit_running_instance exists in [Code] below - with
+; /SUPPRESSMSGBOXES there is nobody to ask, and Setup would simply abort.
+AppMutex={#AppShortName}.Instance
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.17763
@@ -102,6 +112,14 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
 ; Older builds autostarted from the Startup folder; drop it so an upgrade does
 ; not leave two launches racing each other.
 Type: files; Name: "{userstartup}\{#AppName}.lnk"
+; Generated artwork, cleared wholesale rather than by name. [Files] only adds
+; and replaces, so an upgrade from 2.2.0 or earlier otherwise keeps 136
+; ring_*.png from the retired flipbook and two dead wordmark renders for ever.
+; Both trees are rebuilt in full from dist\Nabd by [Files] immediately after,
+; and naming the retired files individually would need revisiting every time
+; the artwork changes - which is the mistake that left them here.
+Type: filesandordirs; Name: "{app}\_internal\assets\banner"
+Type: filesandordirs; Name: "{app}\_internal\brand\render"
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Start {#AppName} now"; \
@@ -127,6 +145,19 @@ Type: files; Name: "{localappdata}\{#AppShortName}\.banner_trigger"
 [Code]
 // The app and its helpers hold the install folder open; close them before
 // writing over the top, and again before removing it.
+//
+// Two stages, and the order matters. AskNabdToQuit runs FIRST, from
+// InitializeSetup, because Setup tests AppMutex before PrepareToInstall ever
+// runs - so a still-running nab'd would stop the install with a prompt, or,
+// under the updater's /SUPPRESSMSGBOXES, abort outright with nobody to ask.
+// Clearing the mutex up front turns AppMutex into a safety net instead of an
+// obstacle.
+//
+// It also asks rather than kills. taskkill /f gives the app no chance to close
+// its segment cleanly or stop ffmpeg itself; the .quit_trigger is the same
+// path the window's Quit button uses, polled every 150 ms by
+// _watch_hotkey_hold. StopNabd stays as the fallback and as the sweep for the
+// banner and settings helpers, which hold the folder open but claim no mutex.
 procedure StopNabd;
 var
   Code: Integer;
@@ -134,6 +165,30 @@ begin
   Exec(ExpandConstant('{cmd}'),
        '/c taskkill /f /im {#AppExe} >nul 2>&1', '',
        SW_HIDE, ewWaitUntilTerminated, Code);
+end;
+
+procedure AskNabdToQuit;
+var
+  i: Integer;
+begin
+  if not CheckForMutexes('{#AppShortName}.Instance') then
+    Exit;
+  // nabd.poll_quit() unlinks this and stops the tray; the process exiting is
+  // what releases the mutex, so the mutex going is the completion signal.
+  SaveStringToFile(
+    ExpandConstant('{localappdata}\{#AppShortName}\.quit_trigger'), '', False);
+  for i := 1 to 40 do            // up to 10s; it normally goes in well under 1
+  begin
+    Sleep(250);
+    if not CheckForMutexes('{#AppShortName}.Instance') then
+      Break;
+  end;
+end;
+
+function InitializeSetup: Boolean;
+begin
+  AskNabdToQuit;
+  Result := True;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -144,6 +199,7 @@ end;
 
 function InitializeUninstall: Boolean;
 begin
+  AskNabdToQuit;
   StopNabd;
   Result := True;
 end;
